@@ -46,6 +46,12 @@ async function callGemini(systemText, userText) {
   const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
   if (!key) throw new Error("GEMINI_API_KEY 미설정");
 
+  // thinking 토큰이 maxOutputTokens를 잠식해 응답이 잘리는 문제 방지.
+  // Gemini 2.5 계열은 thinkingBudget:0으로 비활성화, 3.x 계열은 thinkingLevel 사용.
+  const thinkingConfig = model.startsWith("gemini-3")
+    ? { thinkingLevel: "low" }
+    : { thinkingBudget: 0 };
+
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const res = await fetch(url, {
     method: "POST",
@@ -53,7 +59,12 @@ async function callGemini(systemText, userText) {
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: systemText }] },
       contents: [{ role: "user", parts: [{ text: userText }] }],
-      generationConfig: { temperature: 0.7, maxOutputTokens: 2048, responseMimeType: "application/json" },
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 4096,
+        responseMimeType: "application/json",
+        thinkingConfig,
+      },
     }),
   });
   if (!res.ok) {
@@ -67,12 +78,30 @@ async function callGemini(systemText, userText) {
 
 function parseResult(text) {
   const clean = (text || "").replace(/```json|```/g, "").trim();
+
+  // 1) 정상 JSON
   try {
     const o = JSON.parse(clean);
     return { draft: o.draft || "", notes: o.notes || "" };
-  } catch {
-    return { draft: clean, notes: "" };
+  } catch {}
+
+  // 2) 잘린/깨진 JSON에서 draft·notes 문자열만 복구
+  const grab = (re) => {
+    const m = clean.match(re);
+    if (!m) return null;
+    try { return JSON.parse('"' + m[1] + '"'); } catch { return m[1]; }
+  };
+  let draft =
+    grab(/"draft"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"notes"/) ?? // notes 앞까지
+    grab(/"draft"\s*:\s*"((?:[^"\\]|\\.)*)"/) ??               // 닫는 따옴표 있음
+    grab(/"draft"\s*:\s*"((?:[^"\\]|\\.)*)$/);                 // 따옴표 없이 잘림
+  if (draft != null) {
+    const notes = grab(/"notes"\s*:\s*"((?:[^"\\]|\\.)*)"/) || "";
+    return { draft, notes };
   }
+
+  // 3) 최후: 원문 그대로
+  return { draft: clean, notes: "" };
 }
 
 export async function POST(request) {
