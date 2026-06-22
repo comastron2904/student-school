@@ -49,7 +49,7 @@ function buildUser(cat, activities) {
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function callGemini(systemText, userText, { retries = 3 } = {}) {
+async function callGemini(systemText, userText, { retries = 1 } = {}) {
   const key = process.env.GEMINI_API_KEY;
   const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
   if (!key) throw new Error("GEMINI_API_KEY 미설정");
@@ -73,11 +73,10 @@ async function callGemini(systemText, userText, { retries = 3 } = {}) {
   });
 
   let lastErr;
+  // 일시적 오류(overloaded·rate limit·네트워크)일 때만 retries 횟수만큼 추가 시도.
+  // 총 호출은 (1 + retries)회로 제한된다. (기본 1 → 최대 2회)
   for (let attempt = 0; attempt <= retries; attempt++) {
-    // 첫 시도 외에는 지수 백오프 + 지터 (약 0.6s → 1.2s → 2.4s)
-    if (attempt > 0) {
-      await sleep(Math.min(8000, 600 * 2 ** (attempt - 1)) + Math.random() * 300);
-    }
+    if (attempt > 0) await sleep(800 + Math.random() * 400); // 약 0.8~1.2초 후 1회 재시도
 
     let res;
     try {
@@ -87,9 +86,8 @@ async function callGemini(systemText, userText, { retries = 3 } = {}) {
         body: payload,
       });
     } catch (e) {
-      // 네트워크/타임아웃 예외 → 재시도
       lastErr = new Error(`네트워크 오류: ${e?.message || e}`);
-      continue;
+      continue; // 네트워크 예외만 재시도
     }
 
     if (res.ok) {
@@ -97,16 +95,14 @@ async function callGemini(systemText, userText, { retries = 3 } = {}) {
       const cand = data.candidates?.[0];
       const text = (cand?.content?.parts || []).map((p) => p.text || "").join("");
       if (text.trim()) return text;
-
-      // HTTP 200이지만 본문이 비어있는 경우 (MAX_TOKENS during thinking, 안전 차단 등) → 재시도
+      // 200이지만 본문이 빈 경우(MAX_TOKENS·안전 차단 등)는 재시도해도 보통 동일 → 토큰 낭비 없이 즉시 중단
       const reason = cand?.finishReason || data.promptFeedback?.blockReason || "EMPTY";
-      lastErr = new Error(`빈 응답 (${reason})`);
-      continue;
+      throw new Error(`빈 응답 (${reason})`);
     }
 
     const t = await res.text().catch(() => "");
     const err = new Error(`Gemini ${res.status} ${t.slice(0, 200)}`);
-    // 4xx(잘못된 요청·인증 등)은 재시도해도 동일 → 즉시 중단
+    // 일시적 상태코드만 재시도, 그 외(4xx 등)는 즉시 중단
     if (!RETRYABLE_STATUS.has(res.status)) throw err;
     lastErr = err;
   }
@@ -158,10 +154,10 @@ async function generateDraft({ cat, subject, target, mode, activities, draft, in
 
   let result = parseResult(await callGemini(sys, userText));
 
-  // 줄이기 요청이 아닌데 목표의 90%에 못 미치면 1회 보강
+  // 줄이기 요청이 아닌데 목표의 80%에도 못 미치는 경우에만 1회 보강(토큰 절약)
   if (!isShorten && result.draft) {
     const cur = neisBytes(result.draft);
-    if (cur < target * 0.9) {
+    if (cur < target * 0.8) {
       const expandUser = `다음 '${cat.label}' 초안이 목표 분량보다 짧습니다(현재 약 ${cur}바이트 / 목표 ${target}바이트).\n\n"""${result.draft}"""\n\n활동의 맥락·과정·결과·드러난 역량을 더 구체적으로 보강해 목표 분량(약 ${target}바이트, 최소 ${Math.round(target * 0.9)}바이트 이상 ${target}바이트 이하)에 최대한 맞춰 다시 작성하세요. 같은 내용 반복·빈 미사여구는 금지하고, 같은 JSON 형식으로만 출력해 주세요.`;
       try {
         const expanded = parseResult(await callGemini(sys, expandUser));
