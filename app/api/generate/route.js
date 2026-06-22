@@ -24,10 +24,10 @@ ${cat.guide}
 입력에 이런 내용이 있으면 본문에서 제외하고 notes에 알린다.
 
 [분량 — 매우 중요]
-- 목표: NEIS 기준 약 ${target}바이트. 본문은 ${Math.round(target * 0.9)}바이트 이상 ${target}바이트 이하로, 목표에 최대한 가깝게 충분히 작성한다(목표의 90% 이상을 반드시 채울 것). 짧게 끝내지 말 것.
+- ${target}바이트가 상한이다. 어떤 경우에도 ${target}바이트를 초과하지 않는다.
+- 동시에 너무 짧지 않게, 약 ${Math.round(target * 0.88)}~${target}바이트 범위로 목표에 가깝게 작성한다.
 - 바이트 계산: 한글·한자 3바이트, 영문·숫자·공백 1바이트, 줄바꿈 2바이트 (대략 한글 ${Math.round(target / 2.8)}자 분량).
-- 분량이 부족하면 활동의 맥락·동기·구체적 과정·결과·드러난 역량을 더 풀어 목표를 채운다. 단, 같은 내용 반복이나 빈 미사여구로 늘리지 않는다.
-- ${target}바이트를 초과하지는 않는다.
+- 분량이 부족하면 활동의 맥락·과정·결과·역량을 더 풀어 채우되, 같은 내용 반복이나 빈 미사여구로 늘리지 않는다.
 
 반드시 JSON 형식으로만 출력한다: {"draft": "<생기부 본문>", "notes": "<교사 검토 포인트나 제외한 내용을 1~2문장으로. 없으면 빈 문자열>"}`;
 }
@@ -108,35 +108,45 @@ function parseResult(text) {
   return { draft: clean, notes: "" };
 }
 
-// 한 번 생성 + 분량 미달 시 1회 보강
+// 생성 후 [목표의 약 88% ~ 목표] 범위로 수렴 (필요 시 보강/축약 각 1회)
 async function generateDraft({ cat, subject, target, mode, activities, draft, instruction }) {
   const sys = buildSystem(cat, subject, target);
+  const MAX = target;                       // 목표 = 상한 (초과 금지)
+  const MIN = Math.round(target * 0.88);     // 너무 짧지 않게 하한
   const isShorten = mode === "refine" && /간결|줄여|짧게|줄이/.test(instruction || "");
 
   let userText;
   if (mode === "refine") {
-    const keepLen = isShorten
-      ? ""
-      : `\n분량은 목표(${target}바이트, 최소 ${Math.round(target * 0.9)}바이트 이상)에 맞추고, 현재보다 짧아지지 않게 한다.`;
-    userText = `다음은 작성된 '${cat.label}' 초안입니다.\n\n"""${draft}"""\n\n[요청] ${instruction}${keepLen}\n같은 JSON 형식으로만 출력해 주세요.`;
+    const lenNote = isShorten
+      ? `\n분량은 ${MAX}바이트를 넘지 않게 한다.`
+      : `\n분량은 ${MIN}~${MAX}바이트 범위를 유지하되 ${MAX}바이트를 절대 넘지 않는다.`;
+    userText = `다음은 작성된 '${cat.label}' 초안입니다.\n\n"""${draft}"""\n\n[요청] ${instruction}${lenNote}\n같은 JSON 형식으로만 출력해 주세요.`;
   } else {
     userText = buildUser(cat, activities);
   }
 
   let result = parseResult(await callGemini(sys, userText));
+  let bytes = result.draft ? neisBytes(result.draft) : 0;
 
-  // 줄이기 요청이 아닌데 목표의 90%에 못 미치면 1회 보강
-  if (!isShorten && result.draft) {
-    const cur = neisBytes(result.draft);
-    if (cur < target * 0.9) {
-      const expandUser = `다음 '${cat.label}' 초안이 목표 분량보다 짧습니다(현재 약 ${cur}바이트 / 목표 ${target}바이트).\n\n"""${result.draft}"""\n\n활동의 맥락·과정·결과·드러난 역량을 더 구체적으로 보강해 목표 분량(약 ${target}바이트, 최소 ${Math.round(target * 0.9)}바이트 이상 ${target}바이트 이하)에 최대한 맞춰 다시 작성하세요. 같은 내용 반복·빈 미사여구는 금지하고, 같은 JSON 형식으로만 출력해 주세요.`;
-      const expanded = parseResult(await callGemini(sys, expandUser));
-      // 더 길어졌을 때만 채택
-      if (expanded.draft && neisBytes(expanded.draft) > cur) result = expanded;
-    }
+  // 너무 짧으면 1회 보강 (줄이기 요청 제외)
+  if (!isShorten && result.draft && bytes < MIN) {
+    const expandUser = `다음 '${cat.label}' 초안이 짧습니다(현재 약 ${bytes}바이트 / 목표 ${target}바이트).\n\n"""${result.draft}"""\n\n활동의 맥락·과정·결과·역량을 더 구체적으로 보강해 ${MIN}~${MAX}바이트 범위로 다시 작성하세요. ${MAX}바이트를 절대 초과하지 말고, 반복·빈 미사여구는 금지. 같은 JSON 형식으로만 출력해 주세요.`;
+    const ex = parseResult(await callGemini(sys, expandUser));
+    const eb = ex.draft ? neisBytes(ex.draft) : 0;
+    if (ex.draft && eb > bytes) { result = ex; bytes = eb; }   // 더 길어졌을 때만 채택
   }
+
+  // 상한을 넘으면 1회 축약
+  if (result.draft && bytes > MAX) {
+    const trimUser = `다음 '${cat.label}' 초안이 목표 분량을 초과했습니다(현재 약 ${bytes}바이트 / 상한 ${target}바이트).\n\n"""${result.draft}"""\n\n핵심 내용과 문체를 유지하면서 ${MAX}바이트 이하(가능하면 ${MIN}~${MAX}바이트)로 줄여 다시 작성하세요. 같은 JSON 형식으로만 출력해 주세요.`;
+    const tr = parseResult(await callGemini(sys, trimUser));
+    const tb = tr.draft ? neisBytes(tr.draft) : 0;
+    if (tr.draft && tb < bytes) { result = tr; bytes = tb; }   // 더 짧아졌을 때만 채택
+  }
+
   return result;
 }
+
 
 export async function POST(request) {
   // 로그인 사용자만 호출 허용
