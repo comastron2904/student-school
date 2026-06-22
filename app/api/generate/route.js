@@ -45,7 +45,11 @@ function buildUser(cat, activities) {
   return `다음은 한 학생의 활동 관찰 기록입니다.\n\n${lines}\n\n위 내용을 종합해 '${cat.label}' 초안을 작성해 주세요.`;
 }
 
-async function callGemini(systemText, userText) {
+// 일시적으로 재시도할 가치가 있는 상태코드 (overloaded·rate limit·일시 장애)
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function callGemini(systemText, userText, { retries = 3 } = {}) {
   const key = process.env.GEMINI_API_KEY;
   const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
   if (!key) throw new Error("GEMINI_API_KEY 미설정");
@@ -57,27 +61,56 @@ async function callGemini(systemText, userText) {
     : { thinkingBudget: 0 };
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemText }] },
-      contents: [{ role: "user", parts: [{ text: userText }] }],
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 4096,
-        responseMimeType: "application/json",
-        thinkingConfig,
-      },
-    }),
+  const payload = JSON.stringify({
+    systemInstruction: { parts: [{ text: systemText }] },
+    contents: [{ role: "user", parts: [{ text: userText }] }],
+    generationConfig: {
+      temperature: 0.7,
+      maxOutputTokens: 4096,
+      responseMimeType: "application/json",
+      thinkingConfig,
+    },
   });
-  if (!res.ok) {
+
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    // 첫 시도 외에는 지수 백오프 + 지터 (약 0.6s → 1.2s → 2.4s)
+    if (attempt > 0) {
+      await sleep(Math.min(8000, 600 * 2 ** (attempt - 1)) + Math.random() * 300);
+    }
+
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: payload,
+      });
+    } catch (e) {
+      // 네트워크/타임아웃 예외 → 재시도
+      lastErr = new Error(`네트워크 오류: ${e?.message || e}`);
+      continue;
+    }
+
+    if (res.ok) {
+      const data = await res.json();
+      const cand = data.candidates?.[0];
+      const text = (cand?.content?.parts || []).map((p) => p.text || "").join("");
+      if (text.trim()) return text;
+
+      // HTTP 200이지만 본문이 비어있는 경우 (MAX_TOKENS during thinking, 안전 차단 등) → 재시도
+      const reason = cand?.finishReason || data.promptFeedback?.blockReason || "EMPTY";
+      lastErr = new Error(`빈 응답 (${reason})`);
+      continue;
+    }
+
     const t = await res.text().catch(() => "");
-    throw new Error(`Gemini ${res.status} ${t.slice(0, 200)}`);
+    const err = new Error(`Gemini ${res.status} ${t.slice(0, 200)}`);
+    // 4xx(잘못된 요청·인증 등)은 재시도해도 동일 → 즉시 중단
+    if (!RETRYABLE_STATUS.has(res.status)) throw err;
+    lastErr = err;
   }
-  const data = await res.json();
-  const text = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
-  return text;
+  throw lastErr || new Error("Gemini 호출 실패");
 }
 
 function parseResult(text) {
@@ -130,9 +163,13 @@ async function generateDraft({ cat, subject, target, mode, activities, draft, in
     const cur = neisBytes(result.draft);
     if (cur < target * 0.9) {
       const expandUser = `다음 '${cat.label}' 초안이 목표 분량보다 짧습니다(현재 약 ${cur}바이트 / 목표 ${target}바이트).\n\n"""${result.draft}"""\n\n활동의 맥락·과정·결과·드러난 역량을 더 구체적으로 보강해 목표 분량(약 ${target}바이트, 최소 ${Math.round(target * 0.9)}바이트 이상 ${target}바이트 이하)에 최대한 맞춰 다시 작성하세요. 같은 내용 반복·빈 미사여구는 금지하고, 같은 JSON 형식으로만 출력해 주세요.`;
-      const expanded = parseResult(await callGemini(sys, expandUser));
-      // 더 길어졌을 때만 채택
-      if (expanded.draft && neisBytes(expanded.draft) > cur) result = expanded;
+      try {
+        const expanded = parseResult(await callGemini(sys, expandUser));
+        // 더 길어졌을 때만 채택
+        if (expanded.draft && neisBytes(expanded.draft) > cur) result = expanded;
+      } catch {
+        // 보강(2차 호출) 실패는 치명적이지 않음 → 1차 초안을 그대로 사용
+      }
     }
   }
   return result;
