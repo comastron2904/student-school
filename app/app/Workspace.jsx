@@ -165,7 +165,9 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
           return;
         }
         if (data?.code === "RATE_LIMIT") { setError("API 사용량 한도를 초과했습니다. 잠시 후 다시 시도해 주세요."); return; }
-        throw new Error(data?.detail || data?.error || "실패");
+        if (data?.code === "GEMINI_BUSY") { setError("Gemini 서버가 잠시 혼잡합니다. 잠시 후 [생성] 버튼을 다시 눌러 주세요."); return; }
+        setError("생성 실패: " + (data?.detail || data?.error || "알 수 없는 오류"));
+        return;
       }
       patchEntry({ draft: data.draft || "", notes: data.notes || "" });
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
