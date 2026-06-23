@@ -139,3 +139,7 @@ body{
 .sg-keymodal-spacer{flex:1}
 .sg-keyclear{border:1px solid var(--line);background:#fff;color:var(--danger);font-size:12.5px;font-weight:600;padding:8px 13px;border-radius:9px;cursor:pointer;font-family:inherit}
 .sg-keyclear:hover{border-color:var(--danger)}
+
+/* ── PWA 설치 버튼 ── */
+.sg-installbtn{border:1px solid var(--accent);background:var(--accent);color:#fff;font-size:12.5px;font-weight:700;padding:6px 12px;border-radius:8px;cursor:pointer;font-family:inherit;transition:.14s;box-shadow:0 1px 0 var(--accent-d)}
+.sg-installbtn:hover{background:var(--accent-d)}
