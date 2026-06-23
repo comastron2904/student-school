@@ -39,6 +39,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [apiKey, setApiKey] = useState("");          // 기기별 사용자 Gemini 키
   const [keyOpen, setKeyOpen] = useState(false);     // 키 입력 모달
   const [keyInput, setKeyInput] = useState("");      // 모달 임시 입력값
+  const [installEvt, setInstallEvt] = useState(null); // PWA 설치 프롬프트 이벤트
   const searchRef = useRef(null);
   const resultRef = useRef(null);
   const saveTimers = useRef({});
@@ -49,6 +50,25 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   useEffect(() => {
     try { setApiKey(localStorage.getItem("gemini_api_key") || ""); } catch {}
   }, []);
+
+  // PWA 설치 가능 시점 포착 (설치되면 버튼 숨김)
+  useEffect(() => {
+    const onPrompt = (e) => { e.preventDefault(); setInstallEvt(e); };
+    const onInstalled = () => setInstallEvt(null);
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onPrompt);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+
+  async function installApp() {
+    if (!installEvt) return;
+    installEvt.prompt();
+    try { await installEvt.userChoice; } catch {}
+    setInstallEvt(null);
+  }
 
   function openKeyModal() { setKeyInput(apiKey); setKeyOpen(true); }
   function saveKey() {
@@ -206,6 +226,11 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
               {saveState === "saving" ? "저장 중…" : saveState === "saved" ? "저장됨 ✓" : ""}
             </span>
             <span className="sg-user">{userEmail}</span>
+            {installEvt && (
+              <button className="sg-installbtn" onClick={installApp} title="이 앱을 바탕화면에 설치">
+                ⬇ 앱 설치
+              </button>
+            )}
             <button className={"sg-keybtn" + (apiKey ? " on" : "")} onClick={openKeyModal} title={apiKey ? "내 API 키 사용 중" : "API 키 미등록 (서버 기본키 사용)"}>
               API 키{apiKey ? " ✓" : ""}
             </button>
