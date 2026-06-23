@@ -29,29 +29,30 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     return grouped[0]?.entries[0]?.id || null;
   });
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
-  const [open, setOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);      // 사이드바 학생 추가 폼
+  const [navOpen, setNavOpen] = useState(false);      // 모바일 사이드바 드로어
   const [query, setQuery] = useState("");
   const [add, setAdd] = useState({ name: "", grade: "", klass: "", number: "" });
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
-  const [apiKey, setApiKey] = useState("");          // 기기별 사용자 Gemini 키
-  const [keyOpen, setKeyOpen] = useState(false);     // 키 입력 모달
-  const [keyInput, setKeyInput] = useState("");      // 모달 임시 입력값
+  const [apiKey, setApiKey] = useState("");           // 기기별 사용자 Gemini 키
+  const [keyOpen, setKeyOpen] = useState(false);      // 키 입력 모달
+  const [keyInput, setKeyInput] = useState("");       // 모달 임시 입력값
   const [installEvt, setInstallEvt] = useState(null); // PWA 설치 프롬프트 이벤트
-  const searchRef = useRef(null);
+  const addNameRef = useRef(null);
   const resultRef = useRef(null);
   const saveTimers = useRef({});
 
-  useEffect(() => { if (open) setTimeout(() => searchRef.current?.focus(), 30); }, [open]);
+  useEffect(() => { if (addOpen) setTimeout(() => addNameRef.current?.focus(), 30); }, [addOpen]);
 
   // 기기별 저장된 Gemini API 키 불러오기
   useEffect(() => {
     try { setApiKey(localStorage.getItem("gemini_api_key") || ""); } catch {}
   }, []);
 
-  // PWA 설치 가능 시점 포착 (설치되면 버튼 숨김)
+  // PWA 설치 가능 시점 포착
   useEffect(() => {
     const onPrompt = (e) => { e.preventDefault(); setInstallEvt(e); };
     const onInstalled = () => setInstallEvt(null);
@@ -100,7 +101,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   function selectStudent(id) {
     const s = students.find((x) => x.id === id);
     setActiveSid(id); setActiveEid(s?.entries[0]?.id || null);
-    setOpen(false); setQuery("");
+    setNavOpen(false);
   }
   async function addStudent() {
     if (!add.name.trim()) return;
@@ -119,7 +120,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     setStudents((arr) => [...arr, newStudent]);
     setActiveSid(srow.id); setActiveEid(erow?.id || null);
     setAdd({ name: "", grade: "", klass: "", number: "" });
-    setOpen(false); setQuery("");
+    setAddOpen(false);
   }
   async function deleteStudent(id) {
     await supabase.from("students").delete().eq("id", id); // entries는 ON DELETE CASCADE
@@ -180,12 +181,12 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
       const data = await res.json();
       if (!res.ok) {
         if (data?.code === "NO_API_KEY" || data?.code === "BAD_API_KEY") {
-          setError(data.error + " · 우측 상단 [API 키]에서 본인 Gemini 키를 등록해 주세요.");
+          setError(data.error + " · 왼쪽 아래 [API 키]에서 본인 Gemini 키를 등록해 주세요.");
           openKeyModal();
           return;
         }
         if (data?.code === "RATE_LIMIT") { setError("API 사용량 한도를 초과했습니다. 잠시 후 다시 시도해 주세요."); return; }
-        if (data?.code === "GEMINI_BUSY") { setError("Gemini 서버가 잠시 혼잡합니다. 잠시 후 [생성] 버튼을 다시 눌러 주세요."); return; }
+        if (data?.code === "GEMINI_BUSY") { setError("Gemini 서버가 잠시 혼잡합니다. 잠시 후 다시 눌러 주세요."); return; }
         setError("생성 실패: " + (data?.detail || data?.error || "알 수 없는 오류"));
         return;
       }
@@ -215,135 +216,122 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const filtered = students.filter((s) => !query.trim() || s.name.includes(query.trim()));
   const bytes = entry ? neisBytes(entry.draft) : 0;
   const over = entry ? bytes > entry.target : false;
+  const gaugePct = entry ? Math.min((bytes / Math.max(entry.target, 1)) * 100, 100) : 0;
+  const gaugeClass = entry ? (over ? "over" : bytes > entry.target * 0.9 ? "near" : "") : "";
 
   return (
-    <div className="sg-root">
-      <header className="sg-header">
-        <div className="sg-top">
-          <div className="sg-wordmark">생활기록부 작성 도우미</div>
-          <div className="sg-headright">
+    <div className="sg-app">
+      {navOpen && <div className="sg-scrim" onClick={() => setNavOpen(false)} />}
+
+      {/* ───────────── 사이드바 ───────────── */}
+      <aside className={"sg-side" + (navOpen ? " open" : "")}>
+        <div className="sg-side-brand">
+          <div className="sg-side-mark">생활기록부 도우미<small>학교생활기록부 초안 작성 · 교사용</small></div>
+        </div>
+
+        <div className="sg-side-tools">
+          <button className={"sg-newbtn" + (addOpen ? " open" : "")} onClick={() => setAddOpen((o) => !o)}>
+            {addOpen ? "✕ 닫기" : "＋ 새 학생 추가"}
+          </button>
+          <input className="sg-search" placeholder="학생 이름 검색"
+                 value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+
+        {addOpen && (
+          <div className="sg-addform">
+            <input ref={addNameRef} placeholder="이름" value={add.name}
+                   onChange={(e) => setAdd({ ...add, name: e.target.value })}
+                   onKeyDown={(e) => e.key === "Enter" && addStudent()} />
+            <div className="sg-add-row">
+              <input placeholder="학년" value={add.grade} onChange={(e) => setAdd({ ...add, grade: e.target.value })} />
+              <input placeholder="반" value={add.klass} onChange={(e) => setAdd({ ...add, klass: e.target.value })} />
+              <input placeholder="번호" value={add.number} onChange={(e) => setAdd({ ...add, number: e.target.value })} />
+              <button className="sg-addbtn" onClick={addStudent} disabled={!add.name.trim()}>추가</button>
+            </div>
+          </div>
+        )}
+
+        <div className="sg-side-list">
+          <div className="sg-list-label">학생 {students.length}명</div>
+          {filtered.map((s) => (
+            <div key={s.id} className={"sg-srow" + (s.id === activeSid ? " on" : "")} onClick={() => selectStudent(s.id)}>
+              <div className="sg-srow-av">{(s.name || "?").trim().charAt(0)}</div>
+              <div className="sg-srow-main">
+                <div className="sg-srow-name">{s.name}</div>
+                <div className="sg-srow-meta">{studentMeta(s) || "정보 없음"} · {s.entries.length}개 항목</div>
+              </div>
+              <button className="sg-srow-x" onClick={(e) => { e.stopPropagation(); deleteStudent(s.id); }} aria-label="학생 삭제">✕</button>
+            </div>
+          ))}
+          {filtered.length === 0 && (
+            <div className="sg-list-empty">
+              {students.length ? "검색 결과가 없습니다." : "위 ＋ 새 학생 추가로\n학생을 등록하세요."}
+            </div>
+          )}
+        </div>
+
+        <div className="sg-side-foot">
+          <div className="sg-foot-user">
+            <span className="sg-foot-dot" />
+            <span className="sg-foot-email">{userEmail}</span>
+            <span className="sg-topbar-spacer" />
             <span className={"sg-save sg-save-" + saveState}>
               {saveState === "saving" ? "저장 중…" : saveState === "saved" ? "저장됨 ✓" : ""}
             </span>
-            <span className="sg-user">{userEmail}</span>
-            {installEvt && (
-              <button className="sg-installbtn" onClick={installApp} title="이 앱을 바탕화면에 설치">
-                ⬇ 앱 설치
-              </button>
-            )}
-            <button className={"sg-keybtn" + (apiKey ? " on" : "")} onClick={openKeyModal} title={apiKey ? "내 API 키 사용 중" : "API 키 미등록 (서버 기본키 사용)"}>
+          </div>
+          <div className="sg-foot-actions">
+            <button className={"sg-fbtn key" + (apiKey ? " on" : "")} onClick={openKeyModal}>
               API 키{apiKey ? " ✓" : ""}
             </button>
-            <button className="sg-signout" onClick={signOut}>로그아웃</button>
+            {installEvt && <button className="sg-fbtn install" onClick={installApp}>⬇ 앱 설치</button>}
+            <button className="sg-fbtn danger" onClick={signOut}>로그아웃</button>
           </div>
         </div>
-        <p className="sg-sub">학생 활동을 항목별로 입력하면 기재요령에 맞는 초안을 만들어 드립니다 · 교사용</p>
-      </header>
+      </aside>
 
-      {keyOpen && (
-        <>
-          <div className="sg-overlay" style={{ zIndex: 60, background: "rgba(20,30,35,.32)" }} onClick={() => setKeyOpen(false)} />
-          <div className="sg-keymodal">
-            <div className="sg-keymodal-title">Gemini API 키</div>
-            <p className="sg-keymodal-desc">
-              본인 Gemini API 키를 입력하면 이 기기에서는 해당 키로 생성합니다. 키는 이 브라우저에만 저장되며(localStorage) 서버에 보관되지 않습니다.
-            </p>
-            <input
-              className="sg-input" type="password" placeholder="AIza..." value={keyInput}
-              onChange={(e) => setKeyInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && saveKey()} autoFocus
-            />
-            <a className="sg-keymodal-link" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer">
-              키가 없으신가요? Google AI Studio에서 무료로 발급받기 ↗
-            </a>
-            <div className="sg-keymodal-row">
-              {apiKey && <button className="sg-keyclear" onClick={clearKey}>등록 해제</button>}
-              <div className="sg-keymodal-spacer" />
-              <button className="sg-signout" onClick={() => setKeyOpen(false)}>취소</button>
-              <button className="sg-addbtn" onClick={saveKey}>저장</button>
-            </div>
-          </div>
-        </>
-      )}
-
-      <div className="sg-shell">
-        {/* 학생 선택 드롭다운 */}
-        <div className="sg-selectbar">
-          <div className="sg-combo">
-            <button className={"sg-trigger" + (open ? " open" : "")} onClick={() => setOpen((o) => !o)}>
-              {student ? (
-                <span className="sg-trigger-label">
-                  <span className="sg-trigger-name">{student.name}</span>
-                  {studentMeta(student) && <span className="sg-trigger-meta">{studentMeta(student)}</span>}
-                </span>
-              ) : (<span className="sg-trigger-ph">학생을 선택하세요</span>)}
-              <span className="sg-caret">▾</span>
-            </button>
-
-            {open && (
-              <>
-                <div className="sg-overlay" onClick={() => setOpen(false)} />
-                <div className="sg-panel">
-                  <input ref={searchRef} className="sg-search" placeholder="이름 검색"
-                         value={query} onChange={(e) => setQuery(e.target.value)}
-                         onKeyDown={(e) => e.key === "Escape" && setOpen(false)} />
-                  <div className="sg-list">
-                    {filtered.map((s) => (
-                      <div key={s.id} className={"sg-item" + (s.id === activeSid ? " on" : "")} onClick={() => selectStudent(s.id)}>
-                        <div className="sg-item-main">
-                          <div className="sg-item-name">{s.name}</div>
-                          <div className="sg-item-meta">{studentMeta(s) || "정보 없음"} · {s.entries.length}개 항목</div>
-                        </div>
-                        <button className="sg-item-x" onClick={(e) => { e.stopPropagation(); deleteStudent(s.id); }} aria-label="삭제">✕</button>
-                      </div>
-                    ))}
-                    {filtered.length === 0 && <div className="sg-list-empty">{students.length ? "검색 결과 없음" : "아래에서 학생을 추가하세요"}</div>}
-                  </div>
-                  <div className="sg-addbox">
-                    <div className="sg-addbox-title">+ 새 학생</div>
-                    <input className="sg-input sm" placeholder="이름" value={add.name}
-                           onChange={(e) => setAdd({ ...add, name: e.target.value })}
-                           onKeyDown={(e) => e.key === "Enter" && addStudent()} />
-                    <div className="sg-add-row">
-                      <input className="sg-input sm" placeholder="학년" value={add.grade} onChange={(e) => setAdd({ ...add, grade: e.target.value })} />
-                      <input className="sg-input sm" placeholder="반" value={add.klass} onChange={(e) => setAdd({ ...add, klass: e.target.value })} />
-                      <input className="sg-input sm" placeholder="번호" value={add.number} onChange={(e) => setAdd({ ...add, number: e.target.value })} />
-                      <button className="sg-addbtn" onClick={addStudent} disabled={!add.name.trim()}>추가</button>
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-          <div className="sg-count-chip">{students.length}명</div>
-        </div>
-
-        {/* 메인 */}
-        <main className="sg-main">
-          {!student ? (
-            <div className="sg-blank">
-              <div className="sg-blank-mark">명단</div>
-              <p>위 선택창에서 학생을 추가하면<br />학생별 생기부 작성을 시작할 수 있습니다.</p>
+      {/* ───────────── 메인 ───────────── */}
+      <div className="sg-main">
+        <div className="sg-topbar">
+          <button className="sg-burger" onClick={() => setNavOpen(true)} aria-label="메뉴">☰</button>
+          {student ? (
+            <div className="sg-topbar-id">
+              <span className="sg-topbar-name">{student.name}</span>
+              {studentMeta(student) && <span className="sg-topbar-meta">{studentMeta(student)}</span>}
             </div>
           ) : (
-            <>
-              <div className="sg-tabs">
-                {student.entries.map((e) => {
-                  const c = catOf(e.category);
-                  return (
-                    <button key={e.id} className={"sg-tab" + (e.id === activeEid ? " on" : "")} onClick={() => setActiveEid(e.id)}>
-                      {c.short}{c.needsSubject && e.subject ? `·${e.subject}` : ""}
-                      <span className="sg-tab-x" onClick={(ev) => { ev.stopPropagation(); deleteEntry(e.id); }}>✕</span>
-                    </button>
-                  );
-                })}
-                <button className="sg-tab add" onClick={addEntry}>+ 새 항목</button>
-              </div>
+            <span className="sg-topbar-name" style={{ fontSize: 18 }}>생활기록부 도우미</span>
+          )}
+          <span className="sg-topbar-spacer" />
+        </div>
 
+        {!student ? (
+          <div className="sg-blank">
+            <div>
+              <div className="sg-blank-mark">생기부</div>
+              <h2>학생을 추가해 시작하세요</h2>
+              <p>왼쪽 <b>＋ 새 학생 추가</b>로 학생을 등록하면<br />영역별 생기부 초안 작성을 시작할 수 있습니다.</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="sg-tabs">
+              {student.entries.map((e) => {
+                const c = catOf(e.category);
+                return (
+                  <button key={e.id} className={"sg-tab" + (e.id === activeEid ? " on" : "")} onClick={() => setActiveEid(e.id)}>
+                    {c.short}{c.needsSubject && e.subject ? `·${e.subject}` : ""}
+                    <span className="sg-tab-x" onClick={(ev) => { ev.stopPropagation(); deleteEntry(e.id); }}>✕</span>
+                  </button>
+                );
+              })}
+              <button className="sg-tab add" onClick={addEntry}>＋ 새 항목</button>
+            </div>
+
+            <div className="sg-canvas">
               {entry && (
                 <>
                   <div className="sg-card">
-                    <div className="sg-eyebrow">01 · 영역 / 분량</div>
+                    <div className="sg-eyebrow">영역 · 분량</div>
                     <div className="sg-chips">
                       {CATEGORIES.map((c) => (
                         <button key={c.key} className={"sg-chip" + (c.key === entry.category ? " on" : "")}
@@ -352,14 +340,14 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                     </div>
                     <div className="sg-row">
                       {cat.needsSubject && (
-                        <div className="sg-field" style={{ flex: 1 }}>
+                        <div className="sg-field" style={{ flex: 1, minWidth: 200 }}>
                           <label>과목</label>
                           <input className="sg-input" placeholder="예) 통합과학, 문학, 미적분"
                                  value={entry.subject || ""} onChange={(e) => patchEntry({ subject: e.target.value })} />
                         </div>
                       )}
-                      <div className="sg-field" style={{ width: 150 }}>
-                        <label>목표 바이트</label>
+                      <div className="sg-field" style={{ width: 170 }}>
+                        <label>권장 분량 <span className="sub">(NEIS 바이트)</span></label>
                         <input className="sg-input" type="number" min={300} max={4000} step={50}
                                value={entry.target} onChange={(e) => patchEntry({ target: Number(e.target.value) || 0 })} />
                       </div>
@@ -367,8 +355,8 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                   </div>
 
                   <div className="sg-card">
-                    <div className="sg-eyebrow">02 · 활동 기록</div>
-                    <p className="sg-help"><b>한 일/관찰</b>은 사실 위주로, <b>의미/성장</b>은 드러난 역량이나 변화를 적으면 초안 품질이 좋아집니다.</p>
+                    <div className="sg-eyebrow">활동 기록</div>
+                    <p className="sg-help"><b>한 일 / 관찰</b>은 사실 위주로, <b>의미 / 성장</b>은 드러난 역량이나 변화를 적으면 초안 품질이 좋아집니다.</p>
                     <div className="sg-acts">
                       {entry.activities.map((a, i) => (
                         <div className="sg-act" key={a.id}>
@@ -376,7 +364,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                             <span className="sg-act-no">{String(i + 1).padStart(2, "0")}</span>
                             <input className="sg-act-title" placeholder="활동 제목 (예: 환경 캠페인 기획)"
                                    value={a.title} onChange={(e) => updateActivity(a.id, "title", e.target.value)} />
-                            <button className="sg-del" onClick={() => removeActivity(a.id)} disabled={entry.activities.length === 1} aria-label="삭제">✕</button>
+                            <button className="sg-del" onClick={() => removeActivity(a.id)} disabled={entry.activities.length === 1} aria-label="활동 삭제">✕</button>
                           </div>
                           <textarea className="sg-area" rows={2} placeholder="한 일 / 관찰한 내용 — 무엇을, 어떻게 했는지"
                                     value={a.detail} onChange={(e) => updateActivity(a.id, "detail", e.target.value)} />
@@ -385,7 +373,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                         </div>
                       ))}
                     </div>
-                    <button className="sg-addact" onClick={addActivity}>+ 활동 추가</button>
+                    <button className="sg-addact" onClick={addActivity}>＋ 활동 추가</button>
                   </div>
 
                   <button className="sg-generate" onClick={generate} disabled={!hasContent || loading}>
@@ -395,14 +383,17 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
 
                   <div className="sg-card sg-result" ref={resultRef}>
                     <div className="sg-result-top">
-                      <div>
-                        <div className="sg-eyebrow">초안 · {cat.label}{cat.needsSubject && entry.subject ? ` · ${entry.subject}` : ""}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div className="sg-result-eyebrow">초안 · {cat.label}{cat.needsSubject && entry.subject ? ` · ${entry.subject}` : ""}</div>
                         {entry.draft && (
-                          <div className="sg-count">
-                            <span className={over ? "warn" : "ok"}>{bytes}바이트</span>
-                            <span className="dim"> / {entry.target}바이트 · {charCount(entry.draft)}자</span>
-                            {over && <span className="warn"> · 초과</span>}
-                          </div>
+                          <>
+                            <div className="sg-count">
+                              <span className={over ? "warn" : "ok"}>{bytes}바이트</span>
+                              <span className="dim"> / {entry.target}바이트 · {charCount(entry.draft)}자</span>
+                              {over && <span className="warn"> · 초과</span>}
+                            </div>
+                            <div className="sg-gauge"><div className={"sg-gauge-fill " + gaugeClass} style={{ width: gaugePct + "%" }} /></div>
+                          </>
                         )}
                       </div>
                       {entry.draft && <button className="sg-copy" onClick={copyDraft}>{copied ? "복사됨 ✓" : "복사"}</button>}
@@ -413,7 +404,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                     {!entry.draft && !loading && (
                       <div className="sg-empty">
                         <div className="sg-empty-mark">기재</div>
-                        <p>활동을 입력하고 <b>초안 작성</b>을 누르면<br />여기에 생기부 초안이 나타납니다.</p>
+                        <p>활동을 입력하고 <b>생기부 초안 작성</b>을 누르면<br />여기에 초안이 나타납니다.</p>
                       </div>
                     )}
                     {loading && !entry.draft && <div className="sg-empty"><p>{loadingMsg}</p></div>}
@@ -422,7 +413,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                       <>
                         <textarea className="sg-draft" value={entry.draft} spellCheck={false}
                                   onChange={(e) => patchEntry({ draft: e.target.value })} />
-                        {entry.notes && <div className="sg-notes"><span className="sg-notes-tag">검토</span> {entry.notes}</div>}
+                        {entry.notes && <div className="sg-notes"><span className="sg-notes-tag">검토</span>{entry.notes}</div>}
                         <div className="sg-refine">
                           {REFINEMENTS.map((r) => (
                             <button key={r.key} className="sg-rbtn" onClick={() => refine(r.instr)} disabled={loading}>{r.label}</button>
@@ -434,10 +425,35 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                   </div>
                 </>
               )}
-            </>
-          )}
-        </main>
+            </div>
+          </>
+        )}
       </div>
+
+      {/* ───────────── API 키 모달 ───────────── */}
+      {keyOpen && (
+        <>
+          <div className="sg-overlay" onClick={() => setKeyOpen(false)} />
+          <div className="sg-keymodal">
+            <div className="sg-keymodal-title">Gemini API 키</div>
+            <p className="sg-keymodal-desc">
+              본인 Gemini API 키를 입력하면 이 기기에서는 해당 키로 생성합니다. 키는 이 브라우저에만 저장되며(localStorage) 서버에 보관되지 않습니다.
+            </p>
+            <input className="sg-input" type="password" placeholder="AIza..." value={keyInput}
+                   onChange={(e) => setKeyInput(e.target.value)}
+                   onKeyDown={(e) => e.key === "Enter" && saveKey()} autoFocus />
+            <a className="sg-keymodal-link" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer">
+              키가 없으신가요? Google AI Studio에서 무료로 발급받기 ↗
+            </a>
+            <div className="sg-keymodal-row">
+              {apiKey && <button className="sg-keyclear" onClick={clearKey}>등록 해제</button>}
+              <div className="sg-keymodal-spacer" />
+              <button className="sg-ghost" onClick={() => setKeyOpen(false)}>취소</button>
+              <button className="sg-addbtn" onClick={saveKey}>저장</button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
