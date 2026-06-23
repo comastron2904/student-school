@@ -226,8 +226,8 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
               onChange={(e) => setKeyInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && saveKey()} autoFocus
             />
-            <a className="sg-keymodal-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">
-              키 발급받기 (Google AI Studio) ↗
+            <a className="sg-keymodal-link" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer">
+              키가 없으신가요? Google AI Studio에서 무료로 발급받기 ↗
             </a>
             <div className="sg-keymodal-row">
               {apiKey && <button className="sg-keyclear" onClick={clearKey}>등록 해제</button>}
