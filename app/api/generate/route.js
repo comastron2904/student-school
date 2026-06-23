@@ -41,10 +41,11 @@ function buildUser(cat, activities) {
   return `다음은 한 학생의 활동 관찰 기록입니다.\n\n${lines}\n\n위 내용을 종합해 '${cat.label}' 초안을 작성해 주세요.`;
 }
 
-async function callGemini(systemText, userText) {
-  const key = process.env.GEMINI_API_KEY;
+async function callGemini(systemText, userText, apiKey) {
+  // 사용자가 입력한 키 우선, 없으면 서버 환경변수로 폴백
+  const key = (apiKey || "").trim() || process.env.GEMINI_API_KEY;
   const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  if (!key) throw new Error("GEMINI_API_KEY 미설정");
+  if (!key) throw new Error("NO_API_KEY");
 
   // thinking 토큰이 maxOutputTokens를 잠식해 응답이 잘리는 문제 방지.
   // Gemini 2.5 계열은 thinkingBudget:0으로 비활성화, 3.x 계열은 thinkingLevel 사용.
@@ -69,6 +70,8 @@ async function callGemini(systemText, userText) {
   });
   if (!res.ok) {
     const t = await res.text().catch(() => "");
+    if (res.status === 400 || res.status === 401 || res.status === 403) throw new Error("BAD_API_KEY");
+    if (res.status === 429) throw new Error("RATE_LIMIT");
     throw new Error(`Gemini ${res.status} ${t.slice(0, 200)}`);
   }
   const data = await res.json();
@@ -113,7 +116,7 @@ export async function POST(request) {
   let body;
   try { body = await request.json(); } catch { return NextResponse.json({ error: "잘못된 요청" }, { status: 400 }); }
 
-  const { category, subject = "", target = 1500, activities = [], mode = "generate", draft = "", instruction = "" } = body;
+  const { category, subject = "", target = 1500, activities = [], mode = "generate", draft = "", instruction = "", apiKey = "" } = body;
   const cat = catOf(category);
 
   try {
@@ -124,9 +127,13 @@ export async function POST(request) {
     } else {
       userText = buildUser(cat, activities);
     }
-    const text = await callGemini(systemText, userText);
+    const text = await callGemini(systemText, userText, apiKey);
     return NextResponse.json(parseResult(text));
   } catch (e) {
-    return NextResponse.json({ error: "생성 실패", detail: String(e?.message || e) }, { status: 500 });
+    const m = String(e?.message || e);
+    if (m === "NO_API_KEY")  return NextResponse.json({ error: "API 키가 필요합니다", code: "NO_API_KEY" }, { status: 400 });
+    if (m === "BAD_API_KEY") return NextResponse.json({ error: "API 키가 올바르지 않습니다", code: "BAD_API_KEY" }, { status: 400 });
+    if (m === "RATE_LIMIT")  return NextResponse.json({ error: "사용량 한도 초과", code: "RATE_LIMIT" }, { status: 429 });
+    return NextResponse.json({ error: "생성 실패", detail: m }, { status: 500 });
   }
 }
