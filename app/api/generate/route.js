@@ -68,7 +68,7 @@ async function callGemini(systemText, userText, apiKey) {
   // 일시적 서버 오류(5xx)·네트워크 오류일 때만 1회 재시도. 키/요청 오류는 즉시 중단.
   let res, lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 800));
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 1200 + Math.random() * 600));
     try {
       res = await fetch(url, {
         method: "POST",
