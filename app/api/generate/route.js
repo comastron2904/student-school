@@ -54,26 +54,42 @@ async function callGemini(systemText, userText, apiKey) {
     : { thinkingBudget: 0 };
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemText }] },
-      contents: [{ role: "user", parts: [{ text: userText }] }],
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 4096,
-        responseMimeType: "application/json",
-        thinkingConfig,
-      },
-    }),
+  const payload = JSON.stringify({
+    systemInstruction: { parts: [{ text: systemText }] },
+    contents: [{ role: "user", parts: [{ text: userText }] }],
+    generationConfig: {
+      temperature: 0.7,
+      maxOutputTokens: 4096,
+      responseMimeType: "application/json",
+      thinkingConfig,
+    },
   });
-  if (!res.ok) {
+
+  // 일시적 서버 오류(5xx)·네트워크 오류일 때만 1회 재시도. 키/요청 오류는 즉시 중단.
+  let res, lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 800));
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: payload,
+      });
+    } catch (e) {
+      lastErr = e; res = null; continue; // 네트워크 오류 → 재시도
+    }
+    if (res.ok) break;
+    if (res.status >= 500) { lastErr = new Error(`Gemini ${res.status}`); continue; } // 서버 일시오류 → 재시도
+
+    // 4xx: 재시도 의미 없음 — 원인별 분기
     const t = await res.text().catch(() => "");
-    if (res.status === 400 || res.status === 401 || res.status === 403) throw new Error("BAD_API_KEY");
     if (res.status === 429) throw new Error("RATE_LIMIT");
+    if ((res.status === 400 || res.status === 401 || res.status === 403) &&
+        /API_?KEY|api key|PERMISSION_DENIED|credential/i.test(t)) throw new Error("BAD_API_KEY");
     throw new Error(`Gemini ${res.status} ${t.slice(0, 200)}`);
   }
+  if (!res || !res.ok) throw new Error("GEMINI_BUSY"); // 재시도 후에도 실패
+
   const data = await res.json();
   const text = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
   return text;
@@ -134,6 +150,7 @@ export async function POST(request) {
     if (m === "NO_API_KEY")  return NextResponse.json({ error: "API 키가 필요합니다", code: "NO_API_KEY" }, { status: 400 });
     if (m === "BAD_API_KEY") return NextResponse.json({ error: "API 키가 올바르지 않습니다", code: "BAD_API_KEY" }, { status: 400 });
     if (m === "RATE_LIMIT")  return NextResponse.json({ error: "사용량 한도 초과", code: "RATE_LIMIT" }, { status: 429 });
-    return NextResponse.json({ error: "생성 실패", detail: m }, { status: 500 });
+    if (m === "GEMINI_BUSY") return NextResponse.json({ error: "Gemini 서버가 일시적으로 혼잡합니다. 잠시 후 다시 시도해 주세요.", code: "GEMINI_BUSY" }, { status: 503 });
+    return NextResponse.json({ error: "생성 실패", code: "UNKNOWN", detail: m }, { status: 500 });
   }
 }
