@@ -36,11 +36,30 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [loadingMsg, setLoadingMsg] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [apiKey, setApiKey] = useState("");          // 기기별 사용자 Gemini 키
+  const [keyOpen, setKeyOpen] = useState(false);     // 키 입력 모달
+  const [keyInput, setKeyInput] = useState("");      // 모달 임시 입력값
   const searchRef = useRef(null);
   const resultRef = useRef(null);
   const saveTimers = useRef({});
 
   useEffect(() => { if (open) setTimeout(() => searchRef.current?.focus(), 30); }, [open]);
+
+  // 기기별 저장된 Gemini API 키 불러오기
+  useEffect(() => {
+    try { setApiKey(localStorage.getItem("gemini_api_key") || ""); } catch {}
+  }, []);
+
+  function openKeyModal() { setKeyInput(apiKey); setKeyOpen(true); }
+  function saveKey() {
+    const v = keyInput.trim();
+    try { v ? localStorage.setItem("gemini_api_key", v) : localStorage.removeItem("gemini_api_key"); } catch {}
+    setApiKey(v); setKeyOpen(false);
+  }
+  function clearKey() {
+    try { localStorage.removeItem("gemini_api_key"); } catch {}
+    setApiKey(""); setKeyInput(""); setKeyOpen(false);
+  }
 
   const student = students.find((s) => s.id === activeSid) || null;
   const entry = student?.entries.find((e) => e.id === activeEid) || null;
@@ -135,10 +154,19 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     setError(""); setCopied(false); setLoading(true); setLoadingMsg(msg);
     try {
       const res = await fetch("/api/generate", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, apiKey }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data?.detail || data?.error || "실패");
+      if (!res.ok) {
+        if (data?.code === "NO_API_KEY" || data?.code === "BAD_API_KEY") {
+          setError(data.error + " · 우측 상단 [API 키]에서 본인 Gemini 키를 등록해 주세요.");
+          openKeyModal();
+          return;
+        }
+        if (data?.code === "RATE_LIMIT") { setError("API 사용량 한도를 초과했습니다. 잠시 후 다시 시도해 주세요."); return; }
+        throw new Error(data?.detail || data?.error || "실패");
+      }
       patchEntry({ draft: data.draft || "", notes: data.notes || "" });
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
     } catch (e) {
@@ -176,11 +204,40 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
               {saveState === "saving" ? "저장 중…" : saveState === "saved" ? "저장됨 ✓" : ""}
             </span>
             <span className="sg-user">{userEmail}</span>
+            <button className={"sg-keybtn" + (apiKey ? " on" : "")} onClick={openKeyModal} title={apiKey ? "내 API 키 사용 중" : "API 키 미등록 (서버 기본키 사용)"}>
+              API 키{apiKey ? " ✓" : ""}
+            </button>
             <button className="sg-signout" onClick={signOut}>로그아웃</button>
           </div>
         </div>
         <p className="sg-sub">학생 활동을 항목별로 입력하면 기재요령에 맞는 초안을 만들어 드립니다 · 교사용</p>
       </header>
+
+      {keyOpen && (
+        <>
+          <div className="sg-overlay" style={{ zIndex: 60, background: "rgba(20,30,35,.32)" }} onClick={() => setKeyOpen(false)} />
+          <div className="sg-keymodal">
+            <div className="sg-keymodal-title">Gemini API 키</div>
+            <p className="sg-keymodal-desc">
+              본인 Gemini API 키를 입력하면 이 기기에서는 해당 키로 생성합니다. 키는 이 브라우저에만 저장되며(localStorage) 서버에 보관되지 않습니다.
+            </p>
+            <input
+              className="sg-input" type="password" placeholder="AIza..." value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && saveKey()} autoFocus
+            />
+            <a className="sg-keymodal-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">
+              키 발급받기 (Google AI Studio) ↗
+            </a>
+            <div className="sg-keymodal-row">
+              {apiKey && <button className="sg-keyclear" onClick={clearKey}>등록 해제</button>}
+              <div className="sg-keymodal-spacer" />
+              <button className="sg-signout" onClick={() => setKeyOpen(false)}>취소</button>
+              <button className="sg-addbtn" onClick={saveKey}>저장</button>
+            </div>
+          </div>
+        </>
+      )}
 
       <div className="sg-shell">
         {/* 학생 선택 드롭다운 */}
