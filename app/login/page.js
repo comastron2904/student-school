@@ -48,7 +48,7 @@ export default function LoginPage() {
   return (
     <div className="sg-auth">
       <div className="sg-auth-card">
-        <div className="sg-wordmark" style={{ fontSize: 26, textAlign: "center" }}>생활기록부 작성 도우미</div>
+        <div className="sg-auth-mark">생활기록부 도우미</div>
         <p className="sg-auth-sub">{mode === "login" ? "로그인" : "회원가입"} · 교사용</p>
 
         <label className="sg-auth-label">이메일</label>
