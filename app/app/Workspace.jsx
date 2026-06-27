@@ -62,6 +62,8 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState({}); // { [groupKey]: true } = 접힘
   const [add, setAdd] = useState({ name: "", school: "", subject: "", grade: "", klass: "", number: "" });
+  const [editOpen, setEditOpen] = useState(false); // 학생 정보 수정 모달
+  const [edit, setEdit] = useState({ name: "", school: "", grade: "", klass: "", number: "" });
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
   const [error, setError] = useState("");
@@ -160,6 +162,25 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
       setActiveSid(rest[0]?.id || null);
       setActiveEid(rest[0]?.entries[0]?.id || null);
     }
+  }
+  function openEdit() {
+    if (!student) return;
+    setEdit({
+      name: student.name || "", school: student.school || "",
+      grade: student.grade || "", klass: student.klass || "", number: student.number || "",
+    });
+    setError(""); setEditOpen(true);
+  }
+  async function saveEdit() {
+    if (!student || !edit.name.trim()) return;
+    const fields = {
+      name: edit.name.trim(), school: edit.school.trim(),
+      grade: edit.grade.trim(), klass: edit.klass.trim(), number: edit.number.trim(),
+    };
+    const { error } = await supabase.from("students").update(fields).eq("id", student.id);
+    if (error) { setError("학생 정보 수정 실패: " + error.message); return; }
+    setStudents((arr) => arr.map((s) => s.id === student.id ? { ...s, ...fields } : s));
+    setEditOpen(false);
   }
 
   // ── 항목 ──
@@ -389,6 +410,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
             <span className="sg-topbar-name" style={{ fontSize: 18 }}>생활기록부 도우미</span>
           )}
           <span className="sg-topbar-spacer" />
+          {student && <button className="sg-topbar-edit" onClick={openEdit}>학생 정보 수정</button>}
         </div>
 
         {!student ? (
@@ -544,6 +566,55 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
           </>
         )}
       </div>
+
+      {/* ───────────── 학생 정보 수정 모달 ───────────── */}
+      {editOpen && student && (
+        <>
+          <div className="sg-overlay" onClick={() => setEditOpen(false)} />
+          <div className="sg-keymodal">
+            <div className="sg-keymodal-title">학생 정보 수정</div>
+            <div className="sg-edit-grid">
+              <div className="sg-field span2">
+                <label>이름</label>
+                <input className="sg-input sm" value={edit.name} autoFocus
+                       onChange={(e) => setEdit({ ...edit, name: e.target.value })}
+                       onKeyDown={(e) => e.key === "Enter" && saveEdit()} />
+              </div>
+              <div className="sg-field span2">
+                <label>학교</label>
+                <input className="sg-input sm" value={edit.school}
+                       onChange={(e) => setEdit({ ...edit, school: e.target.value })}
+                       onKeyDown={(e) => e.key === "Enter" && saveEdit()} />
+              </div>
+              <div className="sg-field">
+                <label>학년</label>
+                <input className="sg-input sm" value={edit.grade}
+                       onChange={(e) => setEdit({ ...edit, grade: e.target.value })}
+                       onKeyDown={(e) => e.key === "Enter" && saveEdit()} />
+              </div>
+              <div className="sg-field">
+                <label>반</label>
+                <input className="sg-input sm" value={edit.klass}
+                       onChange={(e) => setEdit({ ...edit, klass: e.target.value })}
+                       onKeyDown={(e) => e.key === "Enter" && saveEdit()} />
+              </div>
+              <div className="sg-field">
+                <label>번호</label>
+                <input className="sg-input sm" value={edit.number}
+                       onChange={(e) => setEdit({ ...edit, number: e.target.value })}
+                       onKeyDown={(e) => e.key === "Enter" && saveEdit()} />
+              </div>
+            </div>
+            <p className="sg-edit-hint"><b>과목</b>은 각 세특 항목의 <b>과목</b> 칸에서 항목별로 수정할 수 있어요.</p>
+            {error && <div className="sg-error" style={{ marginTop: 12 }}>{error}</div>}
+            <div className="sg-keymodal-row">
+              <div className="sg-keymodal-spacer" />
+              <button className="sg-ghost" onClick={() => setEditOpen(false)}>취소</button>
+              <button className="sg-addbtn" onClick={saveEdit} disabled={!edit.name.trim()}>저장</button>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* ───────────── API 키 모달 ───────────── */}
       {keyOpen && (
