@@ -69,6 +69,12 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [byteOpen, setByteOpen] = useState(false);   // 바이트 계산기 모달
   const [byteText, setByteText] = useState("");
   const [byteTarget, setByteTarget] = useState(1500);
+  const [byteCat, setByteCat] = useState("subject"); // 바이트 계산기 AI 수정 기준 영역
+  const [byteLoading, setByteLoading] = useState(false);
+  const [byteLoadingMsg, setByteLoadingMsg] = useState("");
+  const [byteError, setByteError] = useState("");
+  const [byteNotes, setByteNotes] = useState("");
+  const [byteRefineText, setByteRefineText] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
   const [error, setError] = useState("");
@@ -260,29 +266,34 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const hasContent = entry?.activities.some((a) => a.title.trim() || a.detail.trim());
 
   // ── AI ──
+  // 공통 호출: /api/generate 요청 + 에러 메시지 매핑. 성공 시 { draft, notes } 반환, 실패 시 throw.
+  async function callGenerate(payload) {
+    const res = await fetch("/api/generate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, apiKey }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      const fail = (msg) => { const e = new Error(msg); e.friendly = true; return e; };
+      if (data?.code === "NO_API_KEY" || data?.code === "BAD_API_KEY") {
+        openKeyModal();
+        throw fail(data.error + " · 왼쪽 아래 [API 키]에서 본인 Gemini 키를 등록해 주세요.");
+      }
+      if (data?.code === "RATE_LIMIT") throw fail("API 사용량 한도를 초과했습니다. 잠시 후 다시 시도해 주세요.");
+      if (data?.code === "GEMINI_BUSY") throw fail("Gemini 서버가 잠시 혼잡합니다. 잠시 후 다시 눌러 주세요.");
+      throw fail("생성 실패: " + (data?.detail || data?.error || "알 수 없는 오류"));
+    }
+    return { draft: data.draft || "", notes: data.notes || "" };
+  }
+
   async function runGenerate(payload, msg) {
     setError(""); setCopied(false); setLoading(true); setLoadingMsg(msg);
     try {
-      const res = await fetch("/api/generate", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...payload, apiKey }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        if (data?.code === "NO_API_KEY" || data?.code === "BAD_API_KEY") {
-          setError(data.error + " · 왼쪽 아래 [API 키]에서 본인 Gemini 키를 등록해 주세요.");
-          openKeyModal();
-          return;
-        }
-        if (data?.code === "RATE_LIMIT") { setError("API 사용량 한도를 초과했습니다. 잠시 후 다시 시도해 주세요."); return; }
-        if (data?.code === "GEMINI_BUSY") { setError("Gemini 서버가 잠시 혼잡합니다. 잠시 후 다시 눌러 주세요."); return; }
-        setError("생성 실패: " + (data?.detail || data?.error || "알 수 없는 오류"));
-        return;
-      }
-      patchEntry({ draft: data.draft || "", notes: data.notes || "" });
+      const { draft, notes } = await callGenerate(payload);
+      patchEntry({ draft, notes });
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
     } catch (e) {
-      setError("생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.");
+      setError(e?.friendly ? e.message : "생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.");
     } finally { setLoading(false); }
   }
   const generate = () => runGenerate(
@@ -298,6 +309,32 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     if (!t || loading || !entry?.draft.trim()) return;
     refine(t);
     setRefineText("");
+  }
+
+  // ── 바이트 계산기 AI 수정 ──
+  async function refineByte(instruction, msg) {
+    const src = byteText.trim();
+    if (!src || byteLoading) return;
+    setByteError(""); setByteNotes(""); setByteLoading(true); setByteLoadingMsg(msg);
+    try {
+      const { draft, notes } = await callGenerate({
+        mode: "refine", category: byteCat, subject: "", target: byteTarget || 1500, draft: src, instruction,
+      });
+      setByteText(draft || src);
+      setByteNotes(notes || "");
+    } catch (e) {
+      setByteError(e?.friendly ? e.message : "수정 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.");
+    } finally { setByteLoading(false); }
+  }
+  function submitByteRefine() {
+    const t = byteRefineText.trim();
+    if (!t || byteLoading || !byteText.trim()) return;
+    refineByte(t, "내용을 다듬는 중…");
+    setByteRefineText("");
+  }
+  function pickByteCat(key) {
+    setByteCat(key);
+    setByteTarget(catOf(key).target); // 영역 선택 시 권장 분량을 기준 바이트로
   }
 
   function copyDraft() {
@@ -601,8 +638,19 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
           <div className="sg-keymodal sg-bytemodal">
             <div className="sg-keymodal-title">바이트 계산기</div>
             <p className="sg-keymodal-desc">
-              외부에서 작성한 생기부 내용을 붙여넣으면 NEIS 기준 바이트 수를 계산합니다. (한글·한자 3, 영문·숫자·공백·기호 1, 줄바꿈 2바이트)
+              외부에서 작성한 생기부 내용을 붙여넣으면 NEIS 기준 바이트 수를 계산하고, AI로 직접 다듬을 수 있습니다. (한글·한자 3, 영문·숫자·공백·기호 1, 줄바꿈 2바이트)
             </p>
+
+            <div className="sg-byte-cats">
+              <span className="sg-byte-cats-label">영역 <small>(AI 수정 기준)</small></span>
+              <div className="sg-chips" style={{ marginBottom: 0 }}>
+                {CATEGORIES.map((c) => (
+                  <button key={c.key} className={"sg-chip" + (c.key === byteCat ? " on" : "")}
+                          onClick={() => pickByteCat(c.key)}>{c.short}</button>
+                ))}
+              </div>
+            </div>
+
             <textarea className="sg-byte-area" placeholder="여기에 생기부 내용을 붙여넣으세요…"
                       value={byteText} onChange={(e) => setByteText(e.target.value)} spellCheck={false} autoFocus />
             <div className="sg-byte-meter">
@@ -618,8 +666,30 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
               </div>
             </div>
             <div className="sg-gauge"><div className={"sg-gauge-fill " + byteGauge} style={{ width: bytePct + "%" }} /></div>
+
+            <div className="sg-byte-ai">
+              <div className="sg-byte-ai-label">AI 수정</div>
+              <div className="sg-refine" style={{ padding: 0 }}>
+                {REFINEMENTS.map((r) => (
+                  <button key={r.key} className="sg-rbtn" onClick={() => refineByte(r.instr, "내용을 다듬는 중…")}
+                          disabled={byteLoading || !byteText.trim()}>{r.label}</button>
+                ))}
+              </div>
+              <div className="sg-refine-custom" style={{ padding: "10px 0 0" }}>
+                <input className="sg-input sm" placeholder="직접 수정 요청 입력 (예: 분량을 1500바이트에 맞춰 줄여줘)"
+                       value={byteRefineText} onChange={(e) => setByteRefineText(e.target.value)}
+                       onKeyDown={(e) => e.key === "Enter" && submitByteRefine()} disabled={byteLoading} />
+                <button className="sg-refine-send" onClick={submitByteRefine} disabled={byteLoading || !byteRefineText.trim() || !byteText.trim()}>
+                  {byteLoading ? "처리 중…" : "요청"}
+                </button>
+              </div>
+              {byteLoading && <p className="sg-byte-status">{byteLoadingMsg || "처리 중…"}</p>}
+              {byteNotes && <div className="sg-notes" style={{ margin: "12px 0 0" }}><span className="sg-notes-tag">검토</span>{byteNotes}</div>}
+              {byteError && <div className="sg-error" style={{ margin: "12px 0 0" }}>{byteError}</div>}
+            </div>
+
             <div className="sg-keymodal-row">
-              <button className="sg-ghost" onClick={() => setByteText("")}>지우기</button>
+              <button className="sg-ghost" onClick={() => { setByteText(""); setByteNotes(""); setByteError(""); }}>지우기</button>
               <div className="sg-keymodal-spacer" />
               <button className="sg-addbtn" onClick={() => setByteOpen(false)}>닫기</button>
             </div>
