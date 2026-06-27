@@ -1,7 +1,7 @@
 // 서버 측 AI 생성 라우트 — Gemini 키는 여기서만 사용(브라우저 비노출)
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { catOf } from "@/lib/categories";
+import { catOf, prioOf } from "@/lib/categories";
 
 function buildSystem(cat, subject, target) {
   return `당신은 대한민국 고등학교 학교생활기록부(생기부) 작성을 돕는 전문 보조자입니다. 교사가 입력한 학생 활동 관찰 기록을 바탕으로 교육부 학교생활기록부 기재요령에 부합하는 '${cat.label}'${cat.needsSubject && subject ? ` (과목: ${subject})` : ""} 초안을 작성합니다.
@@ -15,6 +15,13 @@ function buildSystem(cat, subject, target) {
 
 [영역 관점]
 ${cat.guide}
+
+[활동별 비중 — 우선순위]
+- 일부 활동에는 우선순위가 표시될 수 있다.
+- '우선순위: 높음'으로 표시된 활동은 분량과 서술의 비중을 늘려 본문의 중심으로 구체적으로 다룬다.
+- '우선순위: 낮음'으로 표시된 활동은 핵심만 간략히 보조적으로 언급하며, 전체 흐름상 자연스럽지 않으면 생략해도 된다.
+- 표시가 없는 활동은 보통 비중으로 다룬다.
+- 단, 우선순위에 따른 비중 조절이 글의 자연스러움을 해치지 않도록 전체를 하나의 매끄러운 흐름으로 엮는다.
 
 [반드시 제외할 항목 — 기재 금지]
 - 특정 대학명, 교외 기관·대회명, 교외 수상 실적
@@ -32,7 +39,9 @@ function buildUser(cat, activities) {
   const lines = (activities || [])
     .filter((a) => a.title?.trim() || a.detail?.trim() || a.meaning?.trim())
     .map((a, i) => {
-      const p = [`활동 ${i + 1}: ${a.title || "(제목 없음)"}`];
+      const pr = prioOf(a.priority ?? 1);
+      const tag = pr.v === 1 ? "" : ` [우선순위: ${pr.label} — ${pr.emph}]`;
+      const p = [`활동 ${i + 1}: ${a.title || "(제목 없음)"}${tag}`];
       if (a.detail?.trim()) p.push(`  - 한 일/관찰: ${a.detail.trim()}`);
       if (a.meaning?.trim()) p.push(`  - 의미/성장: ${a.meaning.trim()}`);
       return p.join("\n");
