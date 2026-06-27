@@ -18,6 +18,34 @@ function groupStudents(students, entries) {
   return students.map((s) => ({ ...s, entries: byStudent[s.id] || [] }));
 }
 
+const gnum = (v) => { const n = parseInt(v, 10); return Number.isNaN(n) ? Infinity : n; };
+
+// 학년/반으로 학생 묶기 (사이드바 분류용)
+function groupByClass(students) {
+  const groups = {};
+  for (const s of students) {
+    const g = (s.grade || "").trim();
+    const k = (s.klass || "").trim();
+    const key = (g || k) ? `${g}|${k}` : "__none__";
+    if (!groups[key]) {
+      const label = g && k ? `${g}학년 ${k}반` : g ? `${g}학년` : k ? `${k}반` : "미분류";
+      groups[key] = { key, label, grade: g, klass: k, students: [] };
+    }
+    groups[key].students.push(s);
+  }
+  const arr = Object.values(groups);
+  for (const grp of arr) {
+    grp.students.sort((a, b) =>
+      gnum(a.number) - gnum(b.number) || (a.name || "").localeCompare(b.name || "", "ko"));
+  }
+  arr.sort((a, b) => {
+    if (a.key === "__none__") return 1;
+    if (b.key === "__none__") return -1;
+    return gnum(a.grade) - gnum(b.grade) || gnum(a.klass) - gnum(b.klass);
+  });
+  return arr;
+}
+
 export default function Workspace({ initialStudents, initialEntries, userEmail }) {
   const router = useRouter();
   const supabase = createClient();
@@ -32,6 +60,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [addOpen, setAddOpen] = useState(false);      // 사이드바 학생 추가 폼
   const [navOpen, setNavOpen] = useState(false);      // 모바일 사이드바 드로어
   const [query, setQuery] = useState("");
+  const [collapsed, setCollapsed] = useState({}); // { [groupKey]: true } = 접힘
   const [add, setAdd] = useState({ name: "", grade: "", klass: "", number: "" });
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
@@ -214,6 +243,9 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   }
 
   const filtered = students.filter((s) => !query.trim() || s.name.includes(query.trim()));
+  const searching = !!query.trim();
+  const groups = groupByClass(filtered);
+  const toggleGroup = (key) => setCollapsed((c) => ({ ...c, [key]: !c[key] }));
   const bytes = entry ? neisBytes(entry.draft) : 0;
   const over = entry ? bytes > entry.target : false;
   const gaugePct = entry ? Math.min((bytes / Math.max(entry.target, 1)) * 100, 100) : 0;
@@ -252,17 +284,32 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
         )}
 
         <div className="sg-side-list">
-          <div className="sg-list-label">학생 {students.length}명</div>
-          {filtered.map((s) => (
-            <div key={s.id} className={"sg-srow" + (s.id === activeSid ? " on" : "")} onClick={() => selectStudent(s.id)}>
-              <div className="sg-srow-av">{(s.name || "?").trim().charAt(0)}</div>
-              <div className="sg-srow-main">
-                <div className="sg-srow-name">{s.name}</div>
-                <div className="sg-srow-meta">{studentMeta(s) || "정보 없음"} · {s.entries.length}개 항목</div>
+          <div className="sg-list-label">학생 {students.length}명 · {groupByClass(students).length}개 학급</div>
+          {groups.map((grp) => {
+            const isCollapsed = !searching && collapsed[grp.key];
+            return (
+              <div className="sg-group" key={grp.key}>
+                <button
+                  className={"sg-group-head" + (isCollapsed ? " collapsed" : "") + (searching ? " no-toggle" : "")}
+                  onClick={searching ? undefined : () => toggleGroup(grp.key)}
+                >
+                  {!searching && <span className="sg-group-caret">▾</span>}
+                  <span className="sg-group-name">{grp.label}</span>
+                  <span className="sg-group-count">{grp.students.length}</span>
+                </button>
+                {!isCollapsed && grp.students.map((s) => (
+                  <div key={s.id} className={"sg-srow" + (s.id === activeSid ? " on" : "")} onClick={() => selectStudent(s.id)}>
+                    <div className="sg-srow-av">{(s.name || "?").trim().charAt(0)}</div>
+                    <div className="sg-srow-main">
+                      <div className="sg-srow-name">{s.name}</div>
+                      <div className="sg-srow-meta">{s.number ? `${s.number}번 · ` : ""}{s.entries.length}개 항목</div>
+                    </div>
+                    <button className="sg-srow-x" onClick={(e) => { e.stopPropagation(); deleteStudent(s.id); }} aria-label="학생 삭제">✕</button>
+                  </div>
+                ))}
               </div>
-              <button className="sg-srow-x" onClick={(e) => { e.stopPropagation(); deleteStudent(s.id); }} aria-label="학생 삭제">✕</button>
-            </div>
-          ))}
+            );
+          })}
           {filtered.length === 0 && (
             <div className="sg-list-empty">
               {students.length ? "검색 결과가 없습니다." : "위 ＋ 새 학생 추가로\n학생을 등록하세요."}
