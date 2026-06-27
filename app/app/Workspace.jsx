@@ -64,6 +64,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [add, setAdd] = useState({ name: "", school: "", subject: "", grade: "", klass: "", number: "" });
   const [editOpen, setEditOpen] = useState(false); // 학생 정보 수정 모달
   const [edit, setEdit] = useState({ name: "", school: "", grade: "", klass: "", number: "" });
+  const [delTarget, setDelTarget] = useState(null); // 삭제 확인 대상 { id, name }
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
   const [error, setError] = useState("");
@@ -365,7 +366,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                       <div className="sg-srow-name">{s.name}</div>
                       <div className="sg-srow-meta">{s.number ? `${s.number}번 · ` : ""}{s.entries.length}개 항목</div>
                     </div>
-                    <button className="sg-srow-x" onClick={(e) => { e.stopPropagation(); deleteStudent(s.id); }} aria-label="학생 삭제">✕</button>
+                    <button className="sg-srow-x" onClick={(e) => { e.stopPropagation(); setDelTarget({ id: s.id, name: s.name }); }} aria-label="학생 삭제">✕</button>
                   </div>
                 ))}
               </div>
@@ -566,6 +567,24 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
           </>
         )}
       </div>
+
+      {/* ───────────── 학생 삭제 확인 모달 ───────────── */}
+      {delTarget && (
+        <>
+          <div className="sg-overlay" onClick={() => setDelTarget(null)} />
+          <div className="sg-keymodal sg-confirm">
+            <div className="sg-keymodal-title">학생을 삭제할까요?</div>
+            <p className="sg-keymodal-desc">
+              <b>{delTarget.name || "이 학생"}</b> 학생과 작성한 <b>모든 생기부 항목·초안</b>이 함께 삭제됩니다. 이 작업은 되돌릴 수 없습니다.
+            </p>
+            <div className="sg-keymodal-row">
+              <div className="sg-keymodal-spacer" />
+              <button className="sg-ghost" onClick={() => setDelTarget(null)}>취소</button>
+              <button className="sg-dangerbtn" onClick={() => { const id = delTarget.id; setDelTarget(null); deleteStudent(id); }}>삭제</button>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* ───────────── 학생 정보 수정 모달 ───────────── */}
       {editOpen && student && (
