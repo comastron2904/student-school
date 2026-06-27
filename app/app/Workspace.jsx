@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -61,7 +61,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [navOpen, setNavOpen] = useState(false);      // 모바일 사이드바 드로어
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState({}); // { [groupKey]: true } = 접힘
-  const [add, setAdd] = useState({ name: "", school: "", grade: "", klass: "", number: "" });
+  const [add, setAdd] = useState({ name: "", school: "", subject: "", grade: "", klass: "", number: "" });
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
   const [error, setError] = useState("");
@@ -142,13 +142,14 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     const defActs = [newActivity()];
     const c = catOf("subject");
     const { data: erow } = await supabase.from("entries")
-      .insert({ student_id: srow.id, category: "subject", subject: "", activities: defActs, target: c.target, draft: "", notes: "" })
+      .insert({ student_id: srow.id, category: "subject", subject: add.subject.trim(), activities: defActs, target: c.target, draft: "", notes: "" })
       .select().single();
 
     const newStudent = { ...srow, entries: erow ? [{ ...erow, activities: defActs }] : [] };
     setStudents((arr) => [...arr, newStudent]);
     setActiveSid(srow.id); setActiveEid(erow?.id || null);
-    setAdd({ name: "", school: "", grade: "", klass: "", number: "" });
+    // 같은 학급·과목 학생을 이어서 추가하기 쉽도록 학교/과목/학년/반은 유지하고 이름·번호만 비움
+    setAdd((p) => ({ name: "", school: p.school, subject: p.subject, grade: p.grade, klass: p.klass, number: "" }));
     setAddOpen(false);
   }
   async function deleteStudent(id) {
@@ -165,9 +166,10 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   async function addEntry() {
     if (!student) return;
     const c = catOf(entry?.category || "subject");
+    const subjDefault = c.key === "subject" ? (entry?.subject || "") : "";
     const defActs = [newActivity()];
     const { data: erow, error } = await supabase.from("entries")
-      .insert({ student_id: student.id, category: c.key, subject: "", activities: defActs, target: c.target, draft: "", notes: "" })
+      .insert({ student_id: student.id, category: c.key, subject: subjDefault, activities: defActs, target: c.target, draft: "", notes: "" })
       .select().single();
     if (error || !erow) { setError("항목 추가 실패: " + (error?.message || "")); return; }
     const e = { ...erow, activities: defActs };
@@ -196,6 +198,38 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const updateActivity = (id, field, val) => setActivities((a) => a.map((x) => x.id === id ? { ...x, [field]: val } : x));
   const addActivity = () => setActivities((a) => [...a, newActivity()]);
   const removeActivity = (id) => setActivities((a) => a.length > 1 ? a.filter((x) => x.id !== id) : a);
+
+  // 제목을 지정해 활동 추가 — 비어 있는 단일 활동이면 거기에 채우고, 아니면 새로 추가
+  const addActivityWithTitle = (title) => setActivities((a) => {
+    const onlyEmpty = a.length === 1 && !a[0].title.trim() && !a[0].detail.trim() && !a[0].meaning.trim();
+    return onlyEmpty ? [{ ...a[0], title }] : [...a, { ...newActivity(), title }];
+  });
+
+  // 모든 학생의 세특(subject) 항목에서 과목별로 사용된 활동 제목을 모은다.
+  const subjectTitleLibrary = useMemo(() => {
+    const map = {};
+    for (const s of students) {
+      for (const e of (s.entries || [])) {
+        if (e.category !== "subject") continue;
+        const subj = (e.subject || "").trim();
+        if (!subj) continue;
+        for (const a of (e.activities || [])) {
+          const t = (a.title || "").trim();
+          if (!t) continue;
+          (map[subj] = map[subj] || new Set()).add(t);
+        }
+      }
+    }
+    const out = {};
+    for (const k in map) out[k] = [...map[k]];
+    return out;
+  }, [students]);
+
+  const subjKey = (entry?.subject || "").trim();
+  const isSubjectEntry = cat?.key === "subject";
+  const allSubjectTitles = isSubjectEntry && subjKey ? (subjectTitleLibrary[subjKey] || []) : [];
+  const presentTitles = new Set((entry?.activities || []).map((a) => (a.title || "").trim()).filter(Boolean));
+  const suggestedTitles = allSubjectTitles.filter((t) => !presentTitles.has(t));
 
   const hasContent = entry?.activities.some((a) => a.title.trim() || a.detail.trim());
 
@@ -276,6 +310,9 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                    onKeyDown={(e) => e.key === "Enter" && addStudent()} />
             <input placeholder="학교 (선택)" value={add.school}
                    onChange={(e) => setAdd({ ...add, school: e.target.value })}
+                   onKeyDown={(e) => e.key === "Enter" && addStudent()} />
+            <input placeholder="과목 (세특 기본 과목, 선택)" value={add.subject}
+                   onChange={(e) => setAdd({ ...add, subject: e.target.value })}
                    onKeyDown={(e) => e.key === "Enter" && addStudent()} />
             <div className="sg-add-row">
               <input placeholder="학년" value={add.grade} onChange={(e) => setAdd({ ...add, grade: e.target.value })} />
@@ -407,12 +444,24 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                   <div className="sg-card">
                     <div className="sg-eyebrow">활동 기록</div>
                     <p className="sg-help"><b>한 일 / 관찰</b>은 사실 위주로, <b>의미 / 성장</b>은 드러난 역량이나 변화를 적으면 초안 품질이 좋아집니다.</p>
+                    {isSubjectEntry && subjKey && suggestedTitles.length > 0 && (
+                      <div className="sg-suggest">
+                        <span className="sg-suggest-label">같은 과목「{subjKey}」 활동 제목 불러오기</span>
+                        <div className="sg-suggest-chips">
+                          {suggestedTitles.map((t) => (
+                            <button key={t} type="button" className="sg-suggest-chip"
+                                    onClick={() => addActivityWithTitle(t)}>＋ {t}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     <div className="sg-acts">
                       {entry.activities.map((a, i) => (
                         <div className="sg-act" key={a.id}>
                           <div className="sg-act-head">
                             <span className="sg-act-no">{String(i + 1).padStart(2, "0")}</span>
                             <input className="sg-act-title" placeholder="활동 제목 (예: 환경 캠페인 기획)"
+                                   list={isSubjectEntry ? "sg-subj-titles" : undefined}
                                    value={a.title} onChange={(e) => updateActivity(a.id, "title", e.target.value)} />
                             <div className="sg-prio" role="group" aria-label="우선순위">
                               <span className="sg-prio-label">우선순위</span>
@@ -434,6 +483,11 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                         </div>
                       ))}
                     </div>
+                    {isSubjectEntry && allSubjectTitles.length > 0 && (
+                      <datalist id="sg-subj-titles">
+                        {allSubjectTitles.map((t) => <option key={t} value={t} />)}
+                      </datalist>
+                    )}
                     <button className="sg-addact" onClick={addActivity}>＋ 활동 추가</button>
                   </div>
 
