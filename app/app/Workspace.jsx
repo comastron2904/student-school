@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
-  CATEGORIES, REFINEMENTS, catOf, studentMeta, neisBytes, charCount, uid, newActivity,
+  CATEGORIES, REFINEMENTS, PRIORITIES, catOf, studentMeta, neisBytes, charCount, uid, newActivity,
 } from "@/lib/categories";
 
 // initialEntries(평면) → 학생별로 묶기
@@ -411,6 +411,17 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                             <span className="sg-act-no">{String(i + 1).padStart(2, "0")}</span>
                             <input className="sg-act-title" placeholder="활동 제목 (예: 환경 캠페인 기획)"
                                    value={a.title} onChange={(e) => updateActivity(a.id, "title", e.target.value)} />
+                            <div className="sg-prio" role="group" aria-label="우선순위">
+                              <span className="sg-prio-label">우선순위</span>
+                              {PRIORITIES.map((p) => (
+                                <button key={p.v} type="button"
+                                        className={"sg-prio-b p" + p.v + ((a.priority ?? 1) === p.v ? " on" : "")}
+                                        title={p.label + " · " + p.hint}
+                                        onClick={() => updateActivity(a.id, "priority", p.v)}>
+                                  {p.label}
+                                </button>
+                              ))}
+                            </div>
                             <button className="sg-del" onClick={() => removeActivity(a.id)} disabled={entry.activities.length === 1} aria-label="활동 삭제">✕</button>
                           </div>
                           <textarea className="sg-area" rows={2} placeholder="한 일 / 관찰한 내용 — 무엇을, 어떻게 했는지"
