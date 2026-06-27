@@ -65,6 +65,10 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [editOpen, setEditOpen] = useState(false); // 학생 정보 수정 모달
   const [edit, setEdit] = useState({ name: "", school: "", grade: "", klass: "", number: "" });
   const [delTarget, setDelTarget] = useState(null); // 삭제 확인 대상 { id, name }
+  const [refineText, setRefineText] = useState("");  // 직접 입력 수정 요청
+  const [byteOpen, setByteOpen] = useState(false);   // 바이트 계산기 모달
+  const [byteText, setByteText] = useState("");
+  const [byteTarget, setByteTarget] = useState(1500);
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
   const [error, setError] = useState("");
@@ -289,6 +293,12 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     { mode: "refine", category: entry.category, subject: entry.subject, target: entry.target, draft: entry.draft, instruction },
     "초안을 다듬는 중…"
   );
+  function submitRefine() {
+    const t = refineText.trim();
+    if (!t || loading || !entry?.draft.trim()) return;
+    refine(t);
+    setRefineText("");
+  }
 
   function copyDraft() {
     navigator.clipboard?.writeText(entry.draft).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1800); });
@@ -306,6 +316,12 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const over = entry ? bytes > entry.target : false;
   const gaugePct = entry ? Math.min((bytes / Math.max(entry.target, 1)) * 100, 100) : 0;
   const gaugeClass = entry ? (over ? "over" : bytes > entry.target * 0.9 ? "near" : "") : "";
+
+  // 바이트 계산기
+  const byteBytes = neisBytes(byteText);
+  const byteOver = byteTarget > 0 && byteBytes > byteTarget;
+  const bytePct = byteTarget > 0 ? Math.min((byteBytes / byteTarget) * 100, 100) : 0;
+  const byteGauge = byteOver ? "over" : (byteTarget > 0 && byteBytes > byteTarget * 0.9) ? "near" : "";
 
   return (
     <div className="sg-app">
@@ -389,6 +405,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
             </span>
           </div>
           <div className="sg-foot-actions">
+            <button className="sg-fbtn" onClick={() => setByteOpen(true)}>바이트 계산기</button>
             <button className={"sg-fbtn key" + (apiKey ? " on" : "")} onClick={openKeyModal}>
               API 키{apiKey ? " ✓" : ""}
             </button>
@@ -549,6 +566,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
 
                     {entry.draft && (
                       <>
+                        <div className="sg-draft-label">본문 — 직접 수정하면 자동 저장되고 바이트 수도 다시 계산됩니다.</div>
                         <textarea className="sg-draft" value={entry.draft} spellCheck={false}
                                   onChange={(e) => patchEntry({ draft: e.target.value })} />
                         {entry.notes && <div className="sg-notes"><span className="sg-notes-tag">검토</span>{entry.notes}</div>}
@@ -556,6 +574,14 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                           {REFINEMENTS.map((r) => (
                             <button key={r.key} className="sg-rbtn" onClick={() => refine(r.instr)} disabled={loading}>{r.label}</button>
                           ))}
+                        </div>
+                        <div className="sg-refine-custom">
+                          <input className="sg-input sm" placeholder="직접 수정 요청 입력 (예: 리더십이 드러나도록 보강해줘)"
+                                 value={refineText} onChange={(e) => setRefineText(e.target.value)}
+                                 onKeyDown={(e) => e.key === "Enter" && submitRefine()} disabled={loading} />
+                          <button className="sg-refine-send" onClick={submitRefine} disabled={loading || !refineText.trim()}>
+                            {loading ? "처리 중…" : "요청"}
+                          </button>
                         </div>
                         <p className="sg-disclaimer">AI가 작성한 초안입니다. 사실 여부·기재 가능 항목을 반드시 교사가 검토·수정한 뒤 사용하세요.</p>
                       </>
@@ -567,6 +593,39 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
           </>
         )}
       </div>
+
+      {/* ───────────── 바이트 계산기 모달 ───────────── */}
+      {byteOpen && (
+        <>
+          <div className="sg-overlay" onClick={() => setByteOpen(false)} />
+          <div className="sg-keymodal sg-bytemodal">
+            <div className="sg-keymodal-title">바이트 계산기</div>
+            <p className="sg-keymodal-desc">
+              외부에서 작성한 생기부 내용을 붙여넣으면 NEIS 기준 바이트 수를 계산합니다. (한글·한자 3, 영문·숫자·공백·기호 1, 줄바꿈 2바이트)
+            </p>
+            <textarea className="sg-byte-area" placeholder="여기에 생기부 내용을 붙여넣으세요…"
+                      value={byteText} onChange={(e) => setByteText(e.target.value)} spellCheck={false} autoFocus />
+            <div className="sg-byte-meter">
+              <div className="sg-count sg-byte-count">
+                <span className={byteOver ? "warn" : "ok"}>{byteBytes}바이트</span>
+                <span className="dim"> / {byteTarget}바이트 · {charCount(byteText)}자</span>
+                {byteOver && <span className="warn"> · {byteBytes - byteTarget}바이트 초과</span>}
+              </div>
+              <div className="sg-byte-target">
+                <label>기준</label>
+                <input className="sg-input sm" type="number" min={0} max={4000} step={50}
+                       value={byteTarget} onChange={(e) => setByteTarget(Number(e.target.value) || 0)} />
+              </div>
+            </div>
+            <div className="sg-gauge"><div className={"sg-gauge-fill " + byteGauge} style={{ width: bytePct + "%" }} /></div>
+            <div className="sg-keymodal-row">
+              <button className="sg-ghost" onClick={() => setByteText("")}>지우기</button>
+              <div className="sg-keymodal-spacer" />
+              <button className="sg-addbtn" onClick={() => setByteOpen(false)}>닫기</button>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* ───────────── 학생 삭제 확인 모달 ───────────── */}
       {delTarget && (
