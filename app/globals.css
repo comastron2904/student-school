@@ -276,11 +276,17 @@ button,input,textarea{font-family:inherit}
 .sg-update-x:hover{color:#fff;background:rgba(255,255,255,.1)}
 
 /* ───────────── 바이트 계산기 모달 ───────────── */
-.sg-bytemodal{width:min(560px,calc(100vw - 36px))}
-.sg-byte-area{width:100%;min-height:200px;max-height:48vh;border:1px solid var(--line);border-radius:12px;padding:13px 15px;font-size:14px;line-height:1.8;color:var(--ink);background:var(--surface2);outline:none;resize:vertical;font-family:'Nanum Myeongjo',serif;transition:.14s}
+.sg-bytemodal{width:min(560px,calc(100vw - 36px));max-height:calc(100vh - 48px);overflow-y:auto}
+.sg-byte-cats{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.sg-byte-cats-label{font-size:12px;font-weight:700;color:var(--ink2);white-space:nowrap}
+.sg-byte-cats-label small{font-weight:500;color:var(--muted)}
+.sg-byte-area{width:100%;min-height:200px;max-height:42vh;border:1px solid var(--line);border-radius:12px;padding:13px 15px;font-size:14px;line-height:1.8;color:var(--ink);background:var(--surface2);outline:none;resize:vertical;font-family:'Nanum Myeongjo',serif;transition:.14s}
 .sg-byte-area:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);background:var(--surface)}
 .sg-byte-meter{display:flex;align-items:center;gap:12px;margin-top:12px}
 .sg-byte-count{margin-top:0;flex:1;font-size:13px}
 .sg-byte-target{flex:0 0 auto;display:flex;align-items:center;gap:7px}
 .sg-byte-target label{font-size:12px;font-weight:600;color:var(--ink2)}
 .sg-byte-target .sg-input{width:92px}
+.sg-byte-ai{margin-top:16px;padding-top:16px;border-top:1px solid var(--line2)}
+.sg-byte-ai-label{font-size:11px;font-weight:800;letter-spacing:.06em;color:var(--accent-d);margin-bottom:10px}
+.sg-byte-status{font-size:12.5px;color:var(--gold);font-weight:600;margin:12px 0 0}
