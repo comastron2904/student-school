@@ -61,7 +61,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [navOpen, setNavOpen] = useState(false);      // 모바일 사이드바 드로어
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState({}); // { [groupKey]: true } = 접힘
-  const [add, setAdd] = useState({ name: "", grade: "", klass: "", number: "" });
+  const [add, setAdd] = useState({ name: "", school: "", grade: "", klass: "", number: "" });
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
   const [error, setError] = useState("");
@@ -135,7 +135,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   async function addStudent() {
     if (!add.name.trim()) return;
     const { data: srow, error } = await supabase.from("students")
-      .insert({ name: add.name.trim(), grade: add.grade.trim(), klass: add.klass.trim(), number: add.number.trim() })
+      .insert({ name: add.name.trim(), school: add.school.trim(), grade: add.grade.trim(), klass: add.klass.trim(), number: add.number.trim() })
       .select().single();
     if (error || !srow) { setError("학생 추가 실패: " + (error?.message || "")); return; }
 
@@ -148,7 +148,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     const newStudent = { ...srow, entries: erow ? [{ ...erow, activities: defActs }] : [] };
     setStudents((arr) => [...arr, newStudent]);
     setActiveSid(srow.id); setActiveEid(erow?.id || null);
-    setAdd({ name: "", grade: "", klass: "", number: "" });
+    setAdd({ name: "", school: "", grade: "", klass: "", number: "" });
     setAddOpen(false);
   }
   async function deleteStudent(id) {
@@ -273,6 +273,9 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
           <div className="sg-addform">
             <input ref={addNameRef} placeholder="이름" value={add.name}
                    onChange={(e) => setAdd({ ...add, name: e.target.value })}
+                   onKeyDown={(e) => e.key === "Enter" && addStudent()} />
+            <input placeholder="학교 (선택)" value={add.school}
+                   onChange={(e) => setAdd({ ...add, school: e.target.value })}
                    onKeyDown={(e) => e.key === "Enter" && addStudent()} />
             <div className="sg-add-row">
               <input placeholder="학년" value={add.grade} onChange={(e) => setAdd({ ...add, grade: e.target.value })} />
