@@ -1,5 +1,6 @@
 import "./globals.css";
 import RegisterSW from "./RegisterSW";
+import UpdateNotice from "./UpdateNotice";
 
 export const metadata = {
   title: "생활기록부 작성 도우미",
@@ -40,6 +41,7 @@ export default function RootLayout({ children }) {
       <body>
         {children}
         <RegisterSW />
+        <UpdateNotice />
       </body>
     </html>
   );
