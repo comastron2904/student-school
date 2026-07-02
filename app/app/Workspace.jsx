@@ -92,6 +92,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [fallbackInfo, setFallbackInfo] = useState(""); // 방금 생성에서 AI 자동 폴백이 있었으면 안내 문구
   const [historyOpen, setHistoryOpen] = useState(false); // 초안 이력 모달
   const [diffTarget, setDiffTarget] = useState(null);    // 이력 모달 내에서 비교 중인 버전
+  const [theme, setThemeState] = useState("light");      // 라이트/다크 모드
   const [provider, setProvider] = useState("gemini"); // 사용 중인 AI 제공자: gemini | openai
   const [geminiKey, setGeminiKey] = useState("");     // 기기별 사용자 Gemini 키
   const [openaiKey, setOpenaiKey] = useState("");     // 기기별 사용자 ChatGPT(OpenAI) 키
@@ -119,6 +120,18 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
       setOpenaiKey(localStorage.getItem("openai_api_key") || "");
     } catch {}
   }, []);
+
+  // 기기별 저장된 라이트/다크 모드 불러오기 (실제 적용은 layout.js의 인라인 스크립트가 먼저 처리해 깜빡임을 막음)
+  useEffect(() => {
+    try { if (localStorage.getItem("ui_theme") === "dark") setThemeState("dark"); } catch {}
+  }, []);
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    setThemeState(next);
+    try { localStorage.setItem("ui_theme", next); } catch {}
+    if (next === "dark") document.documentElement.setAttribute("data-theme", "dark");
+    else document.documentElement.removeAttribute("data-theme");
+  }
 
   // PWA 설치 가능 시점 포착
   useEffect(() => {
@@ -566,6 +579,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
             <button className={"sg-fbtn key" + (apiKey ? " on" : "")} onClick={openKeyModal}>
               {PROVIDERS[provider].label} 키{apiKey ? " ✓" : ""}
             </button>
+            <button className="sg-fbtn" onClick={toggleTheme}>{theme === "dark" ? "☀️ 라이트모드" : "🌙 다크모드"}</button>
             {installEvt && <button className="sg-fbtn install" onClick={installApp}>⬇ 앱 설치</button>}
             <button className="sg-fbtn danger" onClick={signOut}>로그아웃</button>
           </div>
