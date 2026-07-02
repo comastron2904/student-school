@@ -538,6 +538,17 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
           {student && <button className="sg-topbar-edit" onClick={openEdit}>학생 정보 수정</button>}
         </div>
 
+        {!apiKey && (
+          <div className="sg-keybanner">
+            <span className="sg-keybanner-icon">🔑</span>
+            <div className="sg-keybanner-text">
+              <b>AI 초안 생성에는 본인 API 키가 필요해요.</b>
+              <span>Gemini 또는 ChatGPT 중 하나를 골라 무료로 발급받은 키를 등록하면 바로 사용할 수 있어요. 키는 이 브라우저에만 저장되고 서버에는 보관되지 않습니다.</span>
+            </div>
+            <button className="sg-keybanner-btn" onClick={openKeyModal}>API 키 등록</button>
+          </div>
+        )}
+
         {!student ? (
           <div className="sg-blank">
             <div>
