@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
   CATEGORIES, REFINEMENTS, PRIORITIES, catOf, studentMeta, neisBytes, charCount, uid, newActivity,
-  pushHistorySnapshot, MAX_HISTORY, wordDiff,
+  pushHistorySnapshot, MAX_HISTORY, wordDiff, scanForbiddenTerms,
 } from "@/lib/categories";
 
 // 히스토리 타임스탬프 표시용: "07/02 14:23"
@@ -325,6 +325,10 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     if (!diffTarget || !entry) return [];
     return wordDiff(entry.draft || "", diffTarget.draft || "");
   }, [diffTarget, entry?.draft]);
+
+  // 생성된 초안에서 기재 금지 가능성이 있는 표현 사후 검토
+  const forbiddenHits = useMemo(() => scanForbiddenTerms(entry?.draft || ""), [entry?.draft]);
+  const byteForbiddenHits = useMemo(() => scanForbiddenTerms(byteText), [byteText]);
 
   // ── AI ──
   const RETRYABLE_CODES = new Set(["NO_API_KEY", "BAD_API_KEY", "RATE_LIMIT", "AI_BUSY", "NETWORK"]);
@@ -768,6 +772,20 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                         <textarea className="sg-draft" value={entry.draft} spellCheck={false}
                                   onChange={(e) => patchEntry({ draft: e.target.value })} />
                         {entry.notes && <div className="sg-notes"><span className="sg-notes-tag">검토</span>{entry.notes}</div>}
+                        {forbiddenHits.length > 0 && (
+                          <div className="sg-forbidden">
+                            <div className="sg-forbidden-head">⚠️ 검토가 필요할 수 있는 표현 {forbiddenHits.length}건</div>
+                            <div className="sg-forbidden-list">
+                              {forbiddenHits.map((h, i) => (
+                                <div key={i} className="sg-forbidden-item">
+                                  <span className="sg-forbidden-tag">{h.category}</span>
+                                  <span className="sg-forbidden-context">{h.context}</span>
+                                </div>
+                              ))}
+                            </div>
+                            <p className="sg-forbidden-note">자동 감지는 완벽하지 않습니다. 강사·교수 등 특정 인물의 실명은 감지되지 않으니 직접 확인해 주세요.</p>
+                          </div>
+                        )}
                         <div className="sg-refine">
                           {REFINEMENTS.map((r) => (
                             <button key={r.key} className="sg-rbtn" onClick={() => refine(r.instr)} disabled={loading}>{r.label}</button>
@@ -846,6 +864,20 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
               </div>
               {byteLoading && <p className="sg-byte-status">{byteLoadingMsg || "처리 중…"}</p>}
               {byteNotes && <div className="sg-notes" style={{ margin: "12px 0 0" }}><span className="sg-notes-tag">검토</span>{byteNotes}</div>}
+              {byteForbiddenHits.length > 0 && (
+                <div className="sg-forbidden" style={{ margin: "12px 0 0" }}>
+                  <div className="sg-forbidden-head">⚠️ 검토가 필요할 수 있는 표현 {byteForbiddenHits.length}건</div>
+                  <div className="sg-forbidden-list">
+                    {byteForbiddenHits.map((h, i) => (
+                      <div key={i} className="sg-forbidden-item">
+                        <span className="sg-forbidden-tag">{h.category}</span>
+                        <span className="sg-forbidden-context">{h.context}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="sg-forbidden-note">자동 감지는 완벽하지 않습니다. 강사·교수 등 특정 인물의 실명은 감지되지 않으니 직접 확인해 주세요.</p>
+                </div>
+              )}
               {fallbackInfo && <div className="sg-fallback-notice" style={{ margin: "12px 0 0" }}>⚡ {fallbackInfo}</div>}
               {byteError && <div className="sg-error" style={{ margin: "12px 0 0" }}>{byteError}</div>}
             </div>
