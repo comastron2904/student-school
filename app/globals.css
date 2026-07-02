@@ -189,6 +189,7 @@ button,input,textarea{font-family:inherit}
 .sg-gauge-fill.over{background:var(--danger)}
 .sg-copy{flex:0 0 auto;border:1px solid var(--line);background:var(--surface);color:var(--ink2);font-size:12.5px;font-weight:700;padding:8px 14px;border-radius:9px;cursor:pointer;transition:.14s}
 .sg-copy:hover{border-color:var(--accent);color:var(--accent)}
+.sg-result-actions{display:flex;gap:8px;flex:0 0 auto}
 
 .sg-error{margin:14px 22px;background:#fbecec;border:1px solid #efc9c9;color:#8f2e2e;font-size:13px;padding:11px 13px;border-radius:10px}
 .sg-empty{padding:48px 22px;text-align:center;color:var(--muted)}
@@ -248,6 +249,16 @@ button,input,textarea{font-family:inherit}
 .sg-dangerbtn{border:none;background:var(--danger);color:#fff;font-size:12.5px;font-weight:800;padding:9px 18px;border-radius:9px;cursor:pointer;transition:.14s}
 .sg-dangerbtn:hover{filter:brightness(1.06)}
 .sg-keymodal .sg-addbtn{background:var(--accent);color:#fff;padding:9px 18px;border-radius:9px}
+
+.sg-histmodal{width:min(520px,calc(100vw - 36px))}
+.sg-histempty{padding:26px 4px;text-align:center;color:var(--muted);font-size:13px}
+.sg-histlist{display:flex;flex-direction:column;gap:9px;max-height:min(420px,55vh);overflow-y:auto;margin-top:2px}
+.sg-histitem{border:1px solid var(--line);border-radius:11px;padding:11px 13px;background:var(--canvas)}
+.sg-histitem-meta{font-size:11.5px;font-weight:700;color:var(--ink2)}
+.sg-histitem-meta .dim{font-weight:500;color:var(--muted)}
+.sg-histitem-preview{font-size:12.5px;color:var(--ink2);line-height:1.55;margin:6px 0 10px;word-break:break-all}
+.sg-histitem-actions{display:flex;justify-content:flex-end;gap:7px}
+.sg-histitem-actions .sg-ghost,.sg-histitem-actions .sg-addbtn{padding:6px 12px;font-size:12px}
 
 .sg-auth{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(1100px 540px at 18% -8%, #E9F1EC 0%, transparent 60%),radial-gradient(900px 520px at 100% 110%, #EFEADD 0%, transparent 55%),var(--canvas)}
 .sg-auth-card{width:100%;max-width:392px;background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:34px 30px;box-shadow:var(--shadow)}
