@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
   CATEGORIES, REFINEMENTS, PRIORITIES, catOf, studentMeta, neisBytes, charCount, uid, newActivity,
-  pushHistorySnapshot, MAX_HISTORY,
+  pushHistorySnapshot, MAX_HISTORY, wordDiff,
 } from "@/lib/categories";
 
 // 히스토리 타임스탬프 표시용: "07/02 14:23"
@@ -91,6 +91,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [copied, setCopied] = useState(false);
   const [fallbackInfo, setFallbackInfo] = useState(""); // 방금 생성에서 AI 자동 폴백이 있었으면 안내 문구
   const [historyOpen, setHistoryOpen] = useState(false); // 초안 이력 모달
+  const [diffTarget, setDiffTarget] = useState(null);    // 이력 모달 내에서 비교 중인 버전
   const [provider, setProvider] = useState("gemini"); // 사용 중인 AI 제공자: gemini | openai
   const [geminiKey, setGeminiKey] = useState("");     // 기기별 사용자 Gemini 키
   const [openaiKey, setOpenaiKey] = useState("");     // 기기별 사용자 ChatGPT(OpenAI) 키
@@ -306,6 +307,12 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
 
   const hasContent = entry?.activities.some((a) => a.title.trim() || a.detail.trim());
 
+  // 이력 모달에서 비교 중인 버전과 현재 초안의 단어 단위 diff (복원 시 무엇이 바뀌는지 미리 보기)
+  const diffTokens = useMemo(() => {
+    if (!diffTarget || !entry) return [];
+    return wordDiff(entry.draft || "", diffTarget.draft || "");
+  }, [diffTarget, entry?.draft]);
+
   // ── AI ──
   const RETRYABLE_CODES = new Set(["NO_API_KEY", "BAD_API_KEY", "RATE_LIMIT", "AI_BUSY", "NETWORK"]);
 
@@ -394,6 +401,8 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
       history: pushHistorySnapshot(entry.history, { draft: entry.draft, notes: entry.notes || "", label: "수동 저장" }),
     });
   }
+  // 이력 모달을 닫으면서 비교 상태도 함께 초기화
+  function closeHistoryModal() { setHistoryOpen(false); setDiffTarget(null); }
   // 이력의 특정 버전으로 복원 — 복원 전 현재 초안도 이력에 남긴다.
   function restoreVersion(v) {
     if (!entry) return;
@@ -402,7 +411,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
       ? pushHistorySnapshot(entry.history, { draft: entry.draft, notes: entry.notes || "", label: "복원 전" })
       : (entry.history || []);
     patchEntry({ draft: v.draft, notes: v.notes || "", history });
-    setHistoryOpen(false);
+    closeHistoryModal();
   }
   function removeVersion(id) {
     patchEntry({ history: (entry.history || []).filter((h) => h.id !== id) });
@@ -720,7 +729,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                       {entry.draft && (
                         <div className="sg-result-actions">
                           <button className="sg-copy" onClick={snapshotNow} title="현재 초안을 이력에 저장">스냅샷</button>
-                          <button className="sg-copy" onClick={() => setHistoryOpen(true)}>
+                          <button className="sg-copy" onClick={() => { setDiffTarget(null); setHistoryOpen(true); }}>
                             이력{entry.history?.length ? ` (${entry.history.length})` : ""}
                           </button>
                           <button className="sg-copy" onClick={copyDraft}>{copied ? "복사됨 ✓" : "복사"}</button>
@@ -839,35 +848,61 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
       {/* ───────────── 초안 이력 모달 ───────────── */}
       {historyOpen && entry && (
         <>
-          <div className="sg-overlay" onClick={() => setHistoryOpen(false)} />
+          <div className="sg-overlay" onClick={closeHistoryModal} />
           <div className="sg-keymodal sg-histmodal">
-            <div className="sg-keymodal-title">초안 이력</div>
-            <p className="sg-keymodal-desc">
-              AI로 다시 작성·다듬을 때 이전 버전이 자동 저장됩니다. [스냅샷]으로 직접 체크포인트를 남길 수도 있어요. 최근 {MAX_HISTORY}개까지 보관됩니다.
-            </p>
-            {(!entry.history || entry.history.length === 0) ? (
-              <div className="sg-histempty">아직 저장된 이력이 없습니다.</div>
-            ) : (
-              <div className="sg-histlist">
-                {entry.history.map((v) => (
-                  <div key={v.id} className="sg-histitem">
-                    <div className="sg-histitem-meta">
-                      <span>{formatHistDate(v.at)}</span>
-                      <span className="dim"> · {neisBytes(v.draft)}바이트{v.label ? ` · ${v.label}` : ""}</span>
-                    </div>
-                    <div className="sg-histitem-preview">{v.draft.slice(0, 90)}{v.draft.length > 90 ? "…" : ""}</div>
-                    <div className="sg-histitem-actions">
-                      <button className="sg-ghost" onClick={() => removeVersion(v.id)}>삭제</button>
-                      <button className="sg-addbtn" onClick={() => restoreVersion(v)}>이 버전으로 복원</button>
-                    </div>
+            {!diffTarget ? (
+              <>
+                <div className="sg-keymodal-title">초안 이력</div>
+                <p className="sg-keymodal-desc">
+                  AI로 다시 작성·다듬을 때 이전 버전이 자동 저장됩니다. [스냅샷]으로 직접 체크포인트를 남길 수도 있어요. 최근 {MAX_HISTORY}개까지 보관됩니다.
+                </p>
+                {(!entry.history || entry.history.length === 0) ? (
+                  <div className="sg-histempty">아직 저장된 이력이 없습니다.</div>
+                ) : (
+                  <div className="sg-histlist">
+                    {entry.history.map((v) => (
+                      <div key={v.id} className="sg-histitem">
+                        <div className="sg-histitem-meta">
+                          <span>{formatHistDate(v.at)}</span>
+                          <span className="dim"> · {neisBytes(v.draft)}바이트{v.label ? ` · ${v.label}` : ""}</span>
+                        </div>
+                        <div className="sg-histitem-preview">{v.draft.slice(0, 90)}{v.draft.length > 90 ? "…" : ""}</div>
+                        <div className="sg-histitem-actions">
+                          <button className="sg-ghost" onClick={() => removeVersion(v.id)}>삭제</button>
+                          <button className="sg-addbtn" onClick={() => setDiffTarget(v)}>현재와 비교</button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                )}
+                <div className="sg-keymodal-row">
+                  <div className="sg-keymodal-spacer" />
+                  <button className="sg-addbtn" onClick={closeHistoryModal}>닫기</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="sg-keymodal-title">현재 초안과 비교</div>
+                <p className="sg-keymodal-desc">
+                  <span className="sg-diff-swatch del" /> 삭제될 내용 · <span className="sg-diff-swatch add" /> 추가될 내용
+                  {" — "}{formatHistDate(diffTarget.at)}{diffTarget.label ? ` · ${diffTarget.label}` : ""} 버전으로 복원할 때 기준입니다.
+                </p>
+                <div className="sg-diffbox">
+                  {diffTokens.length === 0 ? (
+                    <span className="dim">두 버전의 내용이 같습니다.</span>
+                  ) : (
+                    diffTokens.map((t, idx) => (
+                      <span key={idx} className={t.type === "same" ? undefined : "sg-diff-" + t.type}>{t.text}</span>
+                    ))
+                  )}
+                </div>
+                <div className="sg-keymodal-row">
+                  <button className="sg-ghost" onClick={() => setDiffTarget(null)}>← 목록으로</button>
+                  <div className="sg-keymodal-spacer" />
+                  <button className="sg-addbtn" onClick={() => restoreVersion(diffTarget)}>이 버전으로 복원</button>
+                </div>
+              </>
             )}
-            <div className="sg-keymodal-row">
-              <div className="sg-keymodal-spacer" />
-              <button className="sg-addbtn" onClick={() => setHistoryOpen(false)}>닫기</button>
-            </div>
           </div>
         </>
       )}
