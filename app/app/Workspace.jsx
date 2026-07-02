@@ -89,6 +89,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [loadingMsg, setLoadingMsg] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [fallbackInfo, setFallbackInfo] = useState(""); // 방금 생성에서 AI 자동 폴백이 있었으면 안내 문구
   const [historyOpen, setHistoryOpen] = useState(false); // 초안 이력 모달
   const [provider, setProvider] = useState("gemini"); // 사용 중인 AI 제공자: gemini | openai
   const [geminiKey, setGeminiKey] = useState("");     // 기기별 사용자 Gemini 키
@@ -306,31 +307,71 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const hasContent = entry?.activities.some((a) => a.title.trim() || a.detail.trim());
 
   // ── AI ──
-  // 공통 호출: /api/generate 요청 + 에러 메시지 매핑. 성공 시 { draft, notes } 반환, 실패 시 throw.
-  async function callGenerate(payload) {
-    const res = await fetch("/api/generate", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payload, provider, apiKey }),
-    });
-    const data = await res.json();
+  const RETRYABLE_CODES = new Set(["NO_API_KEY", "BAD_API_KEY", "RATE_LIMIT", "AI_BUSY", "NETWORK"]);
+
+  // 단일 provider 요청 — 실패 시 e.code(서버 에러 코드 또는 NETWORK)를 담아 throw
+  async function requestOnce(payload, useProvider, useKey) {
+    let res;
+    try {
+      res = await fetch("/api/generate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, provider: useProvider, apiKey: useKey }),
+      });
+    } catch {
+      const e = new Error("네트워크 오류"); e.code = "NETWORK"; throw e;
+    }
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const fail = (msg) => { const e = new Error(msg); e.friendly = true; return e; };
-      const providerLabel = PROVIDERS[provider].label;
-      if (data?.code === "NO_API_KEY" || data?.code === "BAD_API_KEY") {
-        openKeyModal();
-        throw fail(data.error + ` · 왼쪽 아래 [API 키]에서 본인 ${providerLabel} 키를 등록해 주세요.`);
-      }
-      if (data?.code === "RATE_LIMIT") throw fail("API 사용량 한도를 초과했습니다. 잠시 후 다시 시도해 주세요.");
-      if (data?.code === "AI_BUSY") throw fail(`${providerLabel} 서버가 잠시 혼잡합니다. 잠시 후 다시 눌러 주세요.`);
-      throw fail("생성 실패: " + (data?.detail || data?.error || "알 수 없는 오류"));
+      const e = new Error(data?.error || "생성 실패");
+      e.code = data?.code || "UNKNOWN"; e.detail = data?.detail;
+      throw e;
     }
     return { draft: data.draft || "", notes: data.notes || "" };
   }
 
-  async function runGenerate(payload, msg) {
-    setError(""); setCopied(false); setLoading(true); setLoadingMsg(msg);
+  // 서버 에러를 화면에 보여줄 문구로 변환
+  function mapFail(e, providerUsed, bothFailed = false, primaryProvider = null) {
+    const fail = (msg) => { const err = new Error(msg); err.friendly = true; return err; };
+    const label = PROVIDERS[providerUsed].label;
+    const prefix = bothFailed ? `${PROVIDERS[primaryProvider].label}·${label} 모두 실패했습니다. ` : "";
+    if (e.code === "NO_API_KEY" || e.code === "BAD_API_KEY") {
+      openKeyModal();
+      return fail(prefix + (e.message || `${label} API 키가 필요합니다`) + " · [API 키]에서 등록해 주세요.");
+    }
+    if (e.code === "RATE_LIMIT") return fail(prefix + "API 사용량 한도를 초과했습니다. 잠시 후 다시 시도해 주세요.");
+    if (e.code === "AI_BUSY" || e.code === "NETWORK") return fail(prefix + `${label} 서버가 잠시 혼잡합니다. 잠시 후 다시 눌러 주세요.`);
+    return fail("생성 실패: " + (e.detail || e.message || "알 수 없는 오류"));
+  }
+
+  // 공통 호출: 현재 선택된 provider로 먼저 시도하고, 키 문제·혼잡 등으로 실패하면
+  // 나머지 한 provider로 자동으로 한 번 더 시도한다(AI 자동 폴백).
+  // onFallbackStart(from, to)는 전환이 실제로 시작될 때 로딩 문구 등을 갱신하기 위한 훅.
+  async function callGenerate(payload, onFallbackStart) {
+    const primary = provider;
+    const fallback = primary === "openai" ? "gemini" : "openai";
+    const keyOf = (p) => (p === "openai" ? openaiKey : geminiKey);
+
     try {
-      const { draft, notes } = await callGenerate(payload);
+      return await requestOnce(payload, primary, keyOf(primary));
+    } catch (e1) {
+      if (!RETRYABLE_CODES.has(e1.code)) throw mapFail(e1, primary);
+      onFallbackStart?.(primary, fallback);
+      try {
+        const result = await requestOnce(payload, fallback, keyOf(fallback));
+        setFallbackInfo(`${PROVIDERS[primary].label}가 응답하지 않아 ${PROVIDERS[fallback].label}로 자동 전환해 생성했어요.`);
+        return result;
+      } catch (e2) {
+        throw mapFail(e2, fallback, true, primary);
+      }
+    }
+  }
+
+  async function runGenerate(payload, msg) {
+    setError(""); setCopied(false); setFallbackInfo(""); setLoading(true); setLoadingMsg(msg);
+    try {
+      const { draft, notes } = await callGenerate(payload, (from, to) => {
+        setLoadingMsg(`${PROVIDERS[from].label}가 혼잡해 ${PROVIDERS[to].label}로 전환하는 중…`);
+      });
       // AI가 초안을 덮어쓰기 전, 기존 초안이 있었다면 이력에 남겨둔다.
       const prevDraft = (entry.draft || "").trim();
       const history = prevDraft
@@ -385,11 +426,11 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   async function refineByte(instruction, msg) {
     const src = byteText.trim();
     if (!src || byteLoading) return;
-    setByteError(""); setByteNotes(""); setByteLoading(true); setByteLoadingMsg(msg);
+    setByteError(""); setByteNotes(""); setFallbackInfo(""); setByteLoading(true); setByteLoadingMsg(msg);
     try {
       const { draft, notes } = await callGenerate({
         mode: "refine", category: byteCat, subject: "", target: byteTarget || 1500, draft: src, instruction,
-      });
+      }, (from, to) => setByteLoadingMsg(`${PROVIDERS[from].label}가 혼잡해 ${PROVIDERS[to].label}로 전환하는 중…`));
       setByteText(draft || src);
       setByteNotes(notes || "");
     } catch (e) {
@@ -519,6 +560,13 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
             {installEvt && <button className="sg-fbtn install" onClick={installApp}>⬇ 앱 설치</button>}
             <button className="sg-fbtn danger" onClick={signOut}>로그아웃</button>
           </div>
+          {apiKey && (
+            <p className="sg-fallback-hint">
+              {geminiKey && openaiKey
+                ? "⚡ 자동 폴백 켜짐 — 한쪽이 혼잡하면 다른 쪽으로 자동 전환돼요."
+                : "두 제공자를 모두 등록하면 한쪽에 문제가 생겨도 자동 전환돼요."}
+            </p>
+          )}
         </div>
       </aside>
 
@@ -543,7 +591,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
             <span className="sg-keybanner-icon">🔑</span>
             <div className="sg-keybanner-text">
               <b>AI 초안 생성에는 본인 API 키가 필요해요.</b>
-              <span>Gemini 또는 ChatGPT 중 하나를 골라 무료로 발급받은 키를 등록하면 바로 사용할 수 있어요. 키는 이 브라우저에만 저장되고 서버에는 보관되지 않습니다.</span>
+              <span>Gemini 또는 ChatGPT 중 하나를 골라 무료로 발급받은 키를 등록하면 바로 사용할 수 있어요. 둘 다 등록해두면 한쪽이 혼잡할 때 자동으로 다른 쪽으로 전환됩니다(AI 자동 폴백). 키는 이 브라우저에만 저장되고 서버에는 보관되지 않습니다.</span>
             </div>
             <button className="sg-keybanner-btn" onClick={openKeyModal}>API 키 등록</button>
           </div>
@@ -680,6 +728,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                       )}
                     </div>
 
+                    {fallbackInfo && <div className="sg-fallback-notice">⚡ {fallbackInfo}</div>}
                     {error && <div className="sg-error">{error}</div>}
 
                     {!entry.draft && !loading && (
@@ -774,6 +823,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
               </div>
               {byteLoading && <p className="sg-byte-status">{byteLoadingMsg || "처리 중…"}</p>}
               {byteNotes && <div className="sg-notes" style={{ margin: "12px 0 0" }}><span className="sg-notes-tag">검토</span>{byteNotes}</div>}
+              {fallbackInfo && <div className="sg-fallback-notice" style={{ margin: "12px 0 0" }}>⚡ {fallbackInfo}</div>}
               {byteError && <div className="sg-error" style={{ margin: "12px 0 0" }}>{byteError}</div>}
             </div>
 
@@ -905,6 +955,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
             </div>
             <p className="sg-keymodal-desc">
               본인 {PROVIDERS[keyProvider].label} API 키를 입력하면 이 기기에서는 해당 키·모델로 생성합니다. 키는 이 브라우저에만 저장되며(localStorage) 서버에 보관되지 않습니다.
+              {" "}Gemini·ChatGPT 두 키를 모두 등록해두면, 생성 중 한쪽이 혼잡하거나 오류가 나면 자동으로 다른 쪽으로 전환해 다시 시도합니다.
             </p>
             <input className="sg-input" type="password" placeholder={PROVIDERS[keyProvider].placeholder} value={keyInput}
                    onChange={(e) => setKeyInput(e.target.value)}
