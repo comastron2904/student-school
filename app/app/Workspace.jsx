@@ -4,7 +4,17 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
   CATEGORIES, REFINEMENTS, PRIORITIES, catOf, studentMeta, neisBytes, charCount, uid, newActivity,
+  pushHistorySnapshot, MAX_HISTORY,
 } from "@/lib/categories";
+
+// 히스토리 타임스탬프 표시용: "07/02 14:23"
+function formatHistDate(iso) {
+  try {
+    const d = new Date(iso);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  } catch { return ""; }
+}
 
 // initialEntries(평면) → 학생별로 묶기
 function groupStudents(students, entries) {
@@ -79,6 +89,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [loadingMsg, setLoadingMsg] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false); // 초안 이력 모달
   const [provider, setProvider] = useState("gemini"); // 사용 중인 AI 제공자: gemini | openai
   const [geminiKey, setGeminiKey] = useState("");     // 기기별 사용자 Gemini 키
   const [openaiKey, setOpenaiKey] = useState("");     // 기기별 사용자 ChatGPT(OpenAI) 키
@@ -320,11 +331,40 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     setError(""); setCopied(false); setLoading(true); setLoadingMsg(msg);
     try {
       const { draft, notes } = await callGenerate(payload);
-      patchEntry({ draft, notes });
+      // AI가 초안을 덮어쓰기 전, 기존 초안이 있었다면 이력에 남겨둔다.
+      const prevDraft = (entry.draft || "").trim();
+      const history = prevDraft
+        ? pushHistorySnapshot(entry.history, {
+            draft: entry.draft, notes: entry.notes || "",
+            label: payload.mode === "refine" ? "AI 다듬기 전" : "새로 작성 전",
+          })
+        : (entry.history || []);
+      patchEntry({ draft, notes, history });
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
     } catch (e) {
       setError(e?.friendly ? e.message : "생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.");
     } finally { setLoading(false); }
+  }
+
+  // 현재 초안을 이력에 그대로 저장(수동 체크포인트) — 초안 자체는 바뀌지 않는다.
+  function snapshotNow() {
+    if (!entry?.draft?.trim()) return;
+    patchEntry({
+      history: pushHistorySnapshot(entry.history, { draft: entry.draft, notes: entry.notes || "", label: "수동 저장" }),
+    });
+  }
+  // 이력의 특정 버전으로 복원 — 복원 전 현재 초안도 이력에 남긴다.
+  function restoreVersion(v) {
+    if (!entry) return;
+    const prevDraft = (entry.draft || "").trim();
+    const history = prevDraft && prevDraft !== v.draft
+      ? pushHistorySnapshot(entry.history, { draft: entry.draft, notes: entry.notes || "", label: "복원 전" })
+      : (entry.history || []);
+    patchEntry({ draft: v.draft, notes: v.notes || "", history });
+    setHistoryOpen(false);
+  }
+  function removeVersion(id) {
+    patchEntry({ history: (entry.history || []).filter((h) => h.id !== id) });
   }
   const generate = () => runGenerate(
     { mode: "generate", category: entry.category, subject: entry.subject, target: entry.target, activities: entry.activities },
@@ -618,7 +658,15 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                           </>
                         )}
                       </div>
-                      {entry.draft && <button className="sg-copy" onClick={copyDraft}>{copied ? "복사됨 ✓" : "복사"}</button>}
+                      {entry.draft && (
+                        <div className="sg-result-actions">
+                          <button className="sg-copy" onClick={snapshotNow} title="현재 초안을 이력에 저장">스냅샷</button>
+                          <button className="sg-copy" onClick={() => setHistoryOpen(true)}>
+                            이력{entry.history?.length ? ` (${entry.history.length})` : ""}
+                          </button>
+                          <button className="sg-copy" onClick={copyDraft}>{copied ? "복사됨 ✓" : "복사"}</button>
+                        </div>
+                      )}
                     </div>
 
                     {error && <div className="sg-error">{error}</div>}
@@ -722,6 +770,42 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
               <button className="sg-ghost" onClick={() => { setByteText(""); setByteNotes(""); setByteError(""); }}>지우기</button>
               <div className="sg-keymodal-spacer" />
               <button className="sg-addbtn" onClick={() => setByteOpen(false)}>닫기</button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ───────────── 초안 이력 모달 ───────────── */}
+      {historyOpen && entry && (
+        <>
+          <div className="sg-overlay" onClick={() => setHistoryOpen(false)} />
+          <div className="sg-keymodal sg-histmodal">
+            <div className="sg-keymodal-title">초안 이력</div>
+            <p className="sg-keymodal-desc">
+              AI로 다시 작성·다듬을 때 이전 버전이 자동 저장됩니다. [스냅샷]으로 직접 체크포인트를 남길 수도 있어요. 최근 {MAX_HISTORY}개까지 보관됩니다.
+            </p>
+            {(!entry.history || entry.history.length === 0) ? (
+              <div className="sg-histempty">아직 저장된 이력이 없습니다.</div>
+            ) : (
+              <div className="sg-histlist">
+                {entry.history.map((v) => (
+                  <div key={v.id} className="sg-histitem">
+                    <div className="sg-histitem-meta">
+                      <span>{formatHistDate(v.at)}</span>
+                      <span className="dim"> · {neisBytes(v.draft)}바이트{v.label ? ` · ${v.label}` : ""}</span>
+                    </div>
+                    <div className="sg-histitem-preview">{v.draft.slice(0, 90)}{v.draft.length > 90 ? "…" : ""}</div>
+                    <div className="sg-histitem-actions">
+                      <button className="sg-ghost" onClick={() => removeVersion(v.id)}>삭제</button>
+                      <button className="sg-addbtn" onClick={() => restoreVersion(v)}>이 버전으로 복원</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="sg-keymodal-row">
+              <div className="sg-keymodal-spacer" />
+              <button className="sg-addbtn" onClick={() => setHistoryOpen(false)}>닫기</button>
             </div>
           </div>
         </>
