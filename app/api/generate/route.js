@@ -1,4 +1,4 @@
-// 서버 측 AI 생성 라우트 — Gemini 키는 여기서만 사용(브라우저 비노출)
+// 서버 측 AI 생성 라우트 — AI 키는 여기서만 사용(브라우저 비노출). Gemini / ChatGPT(OpenAI) 지원
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { catOf, prioOf } from "@/lib/categories";
@@ -104,6 +104,57 @@ async function callGemini(systemText, userText, apiKey) {
   return text;
 }
 
+async function callOpenAI(systemText, userText, apiKey) {
+  // 사용자가 입력한 키 우선, 없으면 서버 환경변수로 폴백
+  const key = (apiKey || "").trim() || process.env.OPENAI_API_KEY;
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  if (!key) throw new Error("NO_API_KEY");
+
+  const url = "https://api.openai.com/v1/chat/completions";
+  const payload = JSON.stringify({
+    model,
+    messages: [
+      { role: "system", content: systemText },
+      { role: "user", content: userText },
+    ],
+    temperature: 0.7,
+    max_tokens: 4096,
+    response_format: { type: "json_object" },
+  });
+
+  // 일시적 서버 오류(5xx)·네트워크 오류일 때만 1회 재시도. 키/요청 오류는 즉시 중단.
+  let res, lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 1200 + Math.random() * 600));
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: payload,
+      });
+    } catch (e) {
+      lastErr = e; res = null; continue; // 네트워크 오류 → 재시도
+    }
+    if (res.ok) break;
+    if (res.status >= 500) { lastErr = new Error(`OpenAI ${res.status}`); continue; } // 서버 일시오류 → 재시도
+
+    // 4xx: 재시도 의미 없음 — 원인별 분기
+    const t = await res.text().catch(() => "");
+    if (res.status === 429) throw new Error("RATE_LIMIT");
+    if (res.status === 401 || res.status === 403) throw new Error("BAD_API_KEY");
+    throw new Error(`OpenAI ${res.status} ${t.slice(0, 200)}`);
+  }
+  if (!res || !res.ok) throw new Error("AI_BUSY"); // 재시도 후에도 실패
+
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || "";
+}
+
+async function callAI(provider, systemText, userText, apiKey) {
+  if (provider === "openai") return callOpenAI(systemText, userText, apiKey);
+  return callGemini(systemText, userText, apiKey);
+}
+
 function parseResult(text) {
   const clean = (text || "").replace(/```json|```/g, "").trim();
 
@@ -141,8 +192,13 @@ export async function POST(request) {
   let body;
   try { body = await request.json(); } catch { return NextResponse.json({ error: "잘못된 요청" }, { status: 400 }); }
 
-  const { category, subject = "", target = 1500, activities = [], mode = "generate", draft = "", instruction = "", apiKey = "" } = body;
+  const {
+    category, subject = "", target = 1500, activities = [], mode = "generate",
+    draft = "", instruction = "", apiKey = "", provider: providerRaw = "gemini",
+  } = body;
   const cat = catOf(category);
+  const provider = providerRaw === "openai" ? "openai" : "gemini";
+  const providerLabel = provider === "openai" ? "ChatGPT" : "Gemini";
 
   try {
     let systemText = buildSystem(cat, subject, target);
@@ -152,14 +208,14 @@ export async function POST(request) {
     } else {
       userText = buildUser(cat, activities);
     }
-    const text = await callGemini(systemText, userText, apiKey);
+    const text = await callAI(provider, systemText, userText, apiKey);
     return NextResponse.json(parseResult(text));
   } catch (e) {
     const m = String(e?.message || e);
-    if (m === "NO_API_KEY")  return NextResponse.json({ error: "API 키가 필요합니다", code: "NO_API_KEY" }, { status: 400 });
-    if (m === "BAD_API_KEY") return NextResponse.json({ error: "API 키가 올바르지 않습니다", code: "BAD_API_KEY" }, { status: 400 });
+    if (m === "NO_API_KEY")  return NextResponse.json({ error: `${providerLabel} API 키가 필요합니다`, code: "NO_API_KEY" }, { status: 400 });
+    if (m === "BAD_API_KEY") return NextResponse.json({ error: `${providerLabel} API 키가 올바르지 않습니다`, code: "BAD_API_KEY" }, { status: 400 });
     if (m === "RATE_LIMIT")  return NextResponse.json({ error: "사용량 한도 초과", code: "RATE_LIMIT" }, { status: 429 });
-    if (m === "GEMINI_BUSY") return NextResponse.json({ error: "Gemini 서버가 일시적으로 혼잡합니다. 잠시 후 다시 시도해 주세요.", code: "GEMINI_BUSY" }, { status: 503 });
+    if (m === "AI_BUSY")     return NextResponse.json({ error: `${providerLabel} 서버가 일시적으로 혼잡합니다. 잠시 후 다시 시도해 주세요.`, code: "AI_BUSY" }, { status: 503 });
     return NextResponse.json({ error: "생성 실패", code: "UNKNOWN", detail: m }, { status: 500 });
   }
 }
