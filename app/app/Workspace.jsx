@@ -331,7 +331,36 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const byteForbiddenHits = useMemo(() => scanForbiddenTerms(byteText), [byteText]);
 
   // ── AI ──
-  const RETRYABLE_CODES = new Set(["NO_API_KEY", "BAD_API_KEY", "RATE_LIMIT", "AI_BUSY", "NETWORK"]);
+  const RETRYABLE_CODES = new Set(["NO_API_KEY", "BAD_API_KEY", "RATE_LIMIT", "QUOTA_EXHAUSTED", "AI_BUSY", "NETWORK"]);
+
+  // 한 제공자의 실패 원인을 사람이 읽을 문장으로 (키 출처까지 반영)
+  function causeOf(e, p) {
+    const label = PROVIDERS[p].label;
+    const shared = e.keySource === "server" ? "(등록된 개인 키가 없어 공용 키로 시도됨) " : "";
+    switch (e.code) {
+      case "NO_API_KEY":      return `${label}: ${shared}API 키가 등록되어 있지 않습니다.`;
+      case "BAD_API_KEY":     return `${label}: ${shared}API 키가 올바르지 않습니다. 키를 다시 복사해 등록해 주세요.`;
+      case "QUOTA_EXHAUSTED": return `${label}: ${shared}사용량(크레딧)이 모두 소진되었습니다. 기다려도 자동으로 복구되지 않으니, 본인 키를 새로 등록하거나 결제·한도를 확인해 주세요.`;
+      case "RATE_LIMIT":      return `${label}: ${shared}요청이 일시적으로 몰렸습니다. 1~2분 후 다시 시도해 주세요.`;
+      case "AI_BUSY":
+      case "NETWORK":         return `${label}: 서버가 일시적으로 혼잡하거나 연결이 불안정합니다.`;
+      default:                return `${label}: ${e.detail || e.message || "알 수 없는 오류"}`;
+    }
+  }
+  const isKeyProblem = (e) => e.code === "NO_API_KEY" || e.code === "BAD_API_KEY" || e.code === "QUOTA_EXHAUSTED";
+
+  // 서버 에러를 화면에 보여줄 문구로 변환.
+  // 자동 폴백으로 둘 다 실패한 경우, 두 제공자의 원인을 '각각' 보여준다.
+  // (기존에는 나중 실패한 제공자의 원인만 남아 진짜 원인이 가려졌음)
+  function mapFail(e1, p1, e2 = null, p2 = null) {
+    const fail = (msg) => { const err = new Error(msg); err.friendly = true; return err; };
+    if (e2 && p2) {
+      if (isKeyProblem(e1) || isKeyProblem(e2)) openKeyModal();
+      return fail(`두 AI 모두 실패했습니다.\n· ${causeOf(e1, p1)}\n· ${causeOf(e2, p2)}`);
+    }
+    if (isKeyProblem(e1)) openKeyModal();
+    return fail(causeOf(e1, p1));
+  }
 
   // 단일 provider 요청 — 실패 시 e.code(서버 에러 코드 또는 NETWORK)를 담아 throw
   async function requestOnce(payload, useProvider, useKey) {
@@ -348,23 +377,10 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     if (!res.ok) {
       const e = new Error(data?.error || "생성 실패");
       e.code = data?.code || "UNKNOWN"; e.detail = data?.detail;
+      e.keySource = data?.keySource || "none"; // user = 본인 키, server = 배포 공용 키
       throw e;
     }
     return { draft: data.draft || "", notes: data.notes || "" };
-  }
-
-  // 서버 에러를 화면에 보여줄 문구로 변환
-  function mapFail(e, providerUsed, bothFailed = false, primaryProvider = null) {
-    const fail = (msg) => { const err = new Error(msg); err.friendly = true; return err; };
-    const label = PROVIDERS[providerUsed].label;
-    const prefix = bothFailed ? `${PROVIDERS[primaryProvider].label}·${label} 모두 실패했습니다. ` : "";
-    if (e.code === "NO_API_KEY" || e.code === "BAD_API_KEY") {
-      openKeyModal();
-      return fail(prefix + (e.message || `${label} API 키가 필요합니다`) + " · [API 키]에서 등록해 주세요.");
-    }
-    if (e.code === "RATE_LIMIT") return fail(prefix + "API 사용량 한도를 초과했습니다. 잠시 후 다시 시도해 주세요.");
-    if (e.code === "AI_BUSY" || e.code === "NETWORK") return fail(prefix + `${label} 서버가 잠시 혼잡합니다. 잠시 후 다시 눌러 주세요.`);
-    return fail("생성 실패: " + (e.detail || e.message || "알 수 없는 오류"));
   }
 
   // 공통 호출: 현재 선택된 provider로 먼저 시도하고, 키 문제·혼잡 등으로 실패하면
@@ -385,7 +401,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
         setFallbackInfo(`${PROVIDERS[primary].label}가 응답하지 않아 ${PROVIDERS[fallback].label}로 자동 전환해 생성했어요.`);
         return result;
       } catch (e2) {
-        throw mapFail(e2, fallback, true, primary);
+        throw mapFail(e1, primary, e2, fallback); // 두 실패 원인을 모두 전달
       }
     }
   }
