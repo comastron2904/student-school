@@ -1,7 +1,16 @@
 // 서버 측 AI 생성 라우트 — AI 키는 여기서만 사용(브라우저 비노출). Gemini / ChatGPT(OpenAI) 지원
+// 가동률: 요청 타임아웃 + 429/5xx 지수 백오프 재시도. 재시도로 풀리지 않는 원인(한도 소진·키 오류)은
+// 즉시 코드로 반환해, 클라이언트가 다음 후보(다른 키·모델·제공자)로 곧바로 넘어가도록 한다.
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { catOf, prioOf, activityTree } from "@/lib/categories";
+import { normProvider, providerLabel, isAllowedModel, defaultModel } from "@/lib/ai";
+
+export const maxDuration = 60; // Vercel 함수 실행 한도 — 재시도 여유 확보
+
+// 초안 분량에 충분하면서 분당 토큰(TPM) 한도 소모를 줄이는 값. 429의 상당수가 TPM 기준이다.
+const MAX_OUTPUT_TOKENS = 2048;
+
 
 function buildSystem(cat, subject, target) {
   return `당신은 대한민국 고등학교 학교생활기록부(생기부) 작성을 돕는 전문 보조자입니다. 교사가 입력한 학생 활동 관찰 기록을 바탕으로 교육부 학교생활기록부 기재요령에 부합하는 '${cat.label}'${cat.needsSubject && subject ? ` (과목: ${subject})` : ""} 초안을 작성합니다.
@@ -79,79 +88,129 @@ function buildUser(cat, activities) {
   return `다음은 한 학생의 활동 관찰 기록입니다.\n\n${lines}${chainBlock}\n\n위 내용을 종합해 '${cat.label}' 초안을 작성해 주세요.`;
 }
 
-// 구조화된 AI 오류 — code(원인)와 keySource(개인 키 / 공용 서버 키) 를 함께 전달
-function aiError(code, keySource, detail = "") {
+// 구조화된 AI 오류 — code(원인)·keySource(개인/공용 키)·retryAfter(초)를 함께 전달
+function aiError(code, keySource, detail = "", retryAfter = 0) {
   const e = new Error(code);
-  e.code = code; e.keySource = keySource; e.detail = detail;
+  e.code = code; e.keySource = keySource; e.detail = detail; e.retryAfter = retryAfter;
   return e;
 }
 
-async function callGemini(systemText, userText, apiKey) {
-  // 사용자가 입력한 키 우선, 없으면 서버 환경변수로 폴백
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 한 번의 요청 타임아웃 — 응답이 늘어질 때 함수 타임아웃까지 끌려가지 않도록 끊고 다음 후보로 넘긴다.
+const REQ_TIMEOUT_MS = 22000;
+// 한 제공자 안에서 재시도에 쓸 수 있는 총 예산(이 시간을 넘기면 즉시 포기하고 클라이언트가 다음 후보로)
+const RETRY_BUDGET_MS = 30000;
+const MAX_ATTEMPTS = 3;
+
+async function fetchTimeout(url, opts, ms = REQ_TIMEOUT_MS) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ac.signal }); }
+  finally { clearTimeout(t); }
+}
+
+// 429 응답에서 "얼마나 기다리라"는 값을 뽑아낸다.
+// Gemini: error.details 의 RetryInfo.retryDelay("27s") / OpenAI: Retry-After 헤더
+function retryAfterOf(res, body) {
+  const h = res?.headers?.get?.("retry-after");
+  if (h && !Number.isNaN(Number(h))) return Number(h);
+  const hm = res?.headers?.get?.("retry-after-ms");
+  if (hm && !Number.isNaN(Number(hm))) return Number(hm) / 1000;
+  const m = (body || "").match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
+  if (m) return Number(m[1]);
+  return 0;
+}
+const backoff = (attempt) => 900 * Math.pow(2, attempt) + Math.random() * 500; // 0.9s → 1.8s → 3.6s(+jitter)
+
+// 제공자별 요청을 공통 재시도 루프로 감싼다.
+//  - 5xx·네트워크·타임아웃 → 지수 백오프로 재시도
+//  - 429 중 '일시적 혼잡'은 서버가 알려준 대기시간만큼 기다렸다 재시도(단, 예산 안에서)
+//  - 429 중 '한도·크레딧 소진'과 키 오류는 재시도해도 소용없으므로 즉시 중단 → 클라이언트가 다음 후보(다른 키·모델·제공자)로 전환
+async function withRetry(keySource, doFetch, classify) {
+  const deadline = Date.now() + RETRY_BUDGET_MS;
+  let lastCode = "AI_BUSY";
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    let res;
+    try {
+      res = await doFetch();
+    } catch (e) {
+      lastCode = e?.name === "AbortError" ? "AI_BUSY" : "NETWORK";
+      if (attempt === MAX_ATTEMPTS - 1 || Date.now() + backoff(attempt) > deadline) break;
+      await sleep(backoff(attempt));
+      continue;
+    }
+    if (res.ok) return res;
+
+    const body = await res.text().catch(() => "");
+
+    if (res.status >= 500) { // 일시적 서버 오류 → 백오프 재시도
+      lastCode = "AI_BUSY";
+      if (attempt === MAX_ATTEMPTS - 1 || Date.now() + backoff(attempt) > deadline) break;
+      await sleep(backoff(attempt));
+      continue;
+    }
+
+    if (res.status === 429) {
+      const ra = retryAfterOf(res, body);
+      if (classify.isQuota(body)) throw aiError("QUOTA_EXHAUSTED", keySource, body.slice(0, 200), ra);
+      // 일시적 rate limit: 서버가 알려준 시간(없으면 백오프)만큼 기다렸다 재시도
+      const wait = ra ? ra * 1000 : backoff(attempt);
+      if (attempt < MAX_ATTEMPTS - 1 && wait <= 8000 && Date.now() + wait < deadline) {
+        await sleep(wait);
+        lastCode = "RATE_LIMIT";
+        continue;
+      }
+      throw aiError("RATE_LIMIT", keySource, body.slice(0, 200), ra || 60);
+    }
+
+    if (classify.isBadKey(res.status, body)) throw aiError("BAD_API_KEY", keySource, body.slice(0, 200));
+    throw aiError("UNKNOWN", keySource, `${classify.name} ${res.status} ${body.slice(0, 200)}`);
+  }
+  throw aiError(lastCode, keySource); // 재시도 예산 소진
+}
+
+async function callGemini(systemText, userText, apiKey, model) {
   const userKey = (apiKey || "").trim();
   const key = userKey || process.env.GEMINI_API_KEY;
   const keySource = userKey ? "user" : (process.env.GEMINI_API_KEY ? "server" : "none");
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
   if (!key) throw aiError("NO_API_KEY", keySource);
 
   // thinking 토큰이 maxOutputTokens를 잠식해 응답이 잘리는 문제 방지.
-  // Gemini 2.5 계열은 thinkingBudget:0으로 비활성화, 3.x 계열은 thinkingLevel 사용.
-  const thinkingConfig = model.startsWith("gemini-3")
-    ? { thinkingLevel: "low" }
-    : { thinkingBudget: 0 };
-
+  const thinkingConfig = model.startsWith("gemini-3") ? { thinkingLevel: "low" } : { thinkingBudget: 0 };
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const payload = JSON.stringify({
     systemInstruction: { parts: [{ text: systemText }] },
     contents: [{ role: "user", parts: [{ text: userText }] }],
     generationConfig: {
       temperature: 0.7,
-      maxOutputTokens: 4096,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
       responseMimeType: "application/json",
       thinkingConfig,
     },
   });
 
-  // 일시적 서버 오류(5xx)·네트워크 오류일 때만 1회 재시도. 키/요청 오류는 즉시 중단.
-  let res, lastErr;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 1200 + Math.random() * 600));
-    try {
-      res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-        body: payload,
-      });
-    } catch (e) {
-      lastErr = e; res = null; continue; // 네트워크 오류 → 재시도
-    }
-    if (res.ok) break;
-    if (res.status >= 500) { lastErr = new Error(`Gemini ${res.status}`); continue; } // 서버 일시오류 → 재시도
-
-    // 4xx: 재시도 의미 없음 — 원인별 분기
-    const t = await res.text().catch(() => "");
-    if (res.status === 429) {
-      // 일일 무료 한도 소진은 몇 분 기다려도 안 풀림 → 별도 코드로 구분
-      if (/PerDay|per day|daily limit|GenerateRequestsPerDay/i.test(t)) throw aiError("QUOTA_EXHAUSTED", keySource, t.slice(0, 200));
-      throw aiError("RATE_LIMIT", keySource, t.slice(0, 200));
-    }
-    if ((res.status === 400 || res.status === 401 || res.status === 403) &&
-        /API_?KEY|api key|PERMISSION_DENIED|credential/i.test(t)) throw aiError("BAD_API_KEY", keySource, t.slice(0, 200));
-    throw aiError("UNKNOWN", keySource, `Gemini ${res.status} ${t.slice(0, 200)}`);
-  }
-  if (!res || !res.ok) throw aiError("AI_BUSY", keySource); // 재시도 후에도 실패
+  const res = await withRetry(keySource,
+    () => fetchTimeout(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      body: payload,
+    }),
+    {
+      name: "Gemini",
+      isQuota: (t) => /PerDay|per day|daily limit|GenerateRequestsPerDay|exceeded your current quota/i.test(t),
+      isBadKey: (status, t) => (status === 400 || status === 401 || status === 403) &&
+        /API_?KEY|api key|PERMISSION_DENIED|credential/i.test(t),
+    });
 
   const data = await res.json();
-  const text = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
-  return text;
+  return (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
 }
 
-async function callOpenAI(systemText, userText, apiKey) {
-  // 사용자가 입력한 키 우선, 없으면 서버 환경변수로 폴백
+async function callOpenAI(systemText, userText, apiKey, model) {
   const userKey = (apiKey || "").trim();
   const key = userKey || process.env.OPENAI_API_KEY;
   const keySource = userKey ? "user" : (process.env.OPENAI_API_KEY ? "server" : "none");
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
   if (!key) throw aiError("NO_API_KEY", keySource);
 
   const url = "https://api.openai.com/v1/chat/completions";
@@ -162,45 +221,29 @@ async function callOpenAI(systemText, userText, apiKey) {
       { role: "user", content: userText },
     ],
     temperature: 0.7,
-    max_tokens: 4096,
+    max_tokens: MAX_OUTPUT_TOKENS,
     response_format: { type: "json_object" },
   });
 
-  // 일시적 서버 오류(5xx)·네트워크 오류일 때만 1회 재시도. 키/요청 오류는 즉시 중단.
-  let res, lastErr;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 1200 + Math.random() * 600));
-    try {
-      res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: payload,
-      });
-    } catch (e) {
-      lastErr = e; res = null; continue; // 네트워크 오류 → 재시도
-    }
-    if (res.ok) break;
-    if (res.status >= 500) { lastErr = new Error(`OpenAI ${res.status}`); continue; } // 서버 일시오류 → 재시도
-
-    // 4xx: 재시도 의미 없음 — 원인별 분기
-    const t = await res.text().catch(() => "");
-    if (res.status === 429) {
-      // insufficient_quota = 크레딧/결제 소진. 기다려도 복구되지 않으므로 반드시 구분한다.
-      if (/insufficient_quota|exceeded your current quota|billing/i.test(t)) throw aiError("QUOTA_EXHAUSTED", keySource, t.slice(0, 200));
-      throw aiError("RATE_LIMIT", keySource, t.slice(0, 200));
-    }
-    if (res.status === 401 || res.status === 403) throw aiError("BAD_API_KEY", keySource, t.slice(0, 200));
-    throw aiError("UNKNOWN", keySource, `OpenAI ${res.status} ${t.slice(0, 200)}`);
-  }
-  if (!res || !res.ok) throw aiError("AI_BUSY", keySource); // 재시도 후에도 실패
+  const res = await withRetry(keySource,
+    () => fetchTimeout(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: payload,
+    }),
+    {
+      name: "OpenAI",
+      isQuota: (t) => /insufficient_quota|exceeded your current quota|billing/i.test(t),
+      isBadKey: (status) => status === 401 || status === 403,
+    });
 
   const data = await res.json();
   return data.choices?.[0]?.message?.content || "";
 }
 
-async function callAI(provider, systemText, userText, apiKey) {
-  if (provider === "openai") return callOpenAI(systemText, userText, apiKey);
-  return callGemini(systemText, userText, apiKey);
+async function callAI(provider, model, systemText, userText, apiKey) {
+  if (provider === "openai") return callOpenAI(systemText, userText, apiKey, model);
+  return callGemini(systemText, userText, apiKey, model);
 }
 
 function parseResult(text) {
@@ -242,33 +285,38 @@ export async function POST(request) {
 
   const {
     category, subject = "", target = 1500, activities = [], mode = "generate",
-    draft = "", instruction = "", apiKey = "", provider: providerRaw = "gemini",
+    draft = "", instruction = "", apiKey = "", provider: providerRaw = "gemini", model: modelRaw = "",
   } = body;
   const cat = catOf(category);
-  const provider = providerRaw === "openai" ? "openai" : "gemini";
-  const providerLabel = provider === "openai" ? "ChatGPT" : "Gemini";
+  const provider = normProvider(providerRaw);
+  const label = providerLabel(provider);
+  // 모델은 화이트리스트 안에서만 허용(임의 모델 주입 방지). 없거나 허용 밖이면 기본 모델.
+  const model = isAllowedModel(provider, modelRaw) ? modelRaw : defaultModel(provider);
 
   try {
-    let systemText = buildSystem(cat, subject, target);
-    let userText;
-    if (mode === "refine") {
-      userText = `다음은 작성된 '${cat.label}' 초안입니다.\n\n"""${draft}"""\n\n[요청] ${instruction}\n같은 JSON 형식으로만 출력해 주세요.`;
-    } else {
-      userText = buildUser(cat, activities);
-    }
-    const text = await callAI(provider, systemText, userText, apiKey);
-    return NextResponse.json(parseResult(text));
+    const systemText = buildSystem(cat, subject, target);
+    const userText = mode === "refine"
+      ? `다음은 작성된 '${cat.label}' 초안입니다.\n\n"""${draft}"""\n\n[요청] ${instruction}\n같은 JSON 형식으로만 출력해 주세요.`
+      : buildUser(cat, activities);
+
+    const text = await callAI(provider, model, systemText, userText, apiKey);
+    return NextResponse.json({ ...parseResult(text), provider, model });
   } catch (e) {
     const code = e?.code || "UNKNOWN";
     const keySource = e?.keySource || "none"; // user = 본인 키, server = 배포 공용 키
     const j = (error, status) =>
-      NextResponse.json({ error, code, keySource, provider, detail: e?.detail || String(e?.message || e) }, { status });
+      NextResponse.json({
+        error, code, keySource, provider, model,
+        retryAfter: e?.retryAfter || 0, // 클라이언트 쿨다운 계산에 사용
+        detail: e?.detail || String(e?.message || e),
+      }, { status });
 
-    if (code === "NO_API_KEY")  return j(`${providerLabel} API 키가 필요합니다`, 400);
-    if (code === "BAD_API_KEY") return j(`${providerLabel} API 키가 올바르지 않습니다`, 400);
-    if (code === "QUOTA_EXHAUSTED") return j(`${providerLabel} 사용량(크레딧)이 모두 소진되었습니다`, 429);
-    if (code === "RATE_LIMIT")  return j(`${providerLabel} 요청이 일시적으로 몰렸습니다`, 429);
-    if (code === "AI_BUSY")     return j(`${providerLabel} 서버가 일시적으로 혼잡합니다`, 503);
+    if (code === "NO_API_KEY")  return j(`${label} API 키가 필요합니다`, 400);
+    if (code === "BAD_API_KEY") return j(`${label} API 키가 올바르지 않습니다`, 400);
+    if (code === "QUOTA_EXHAUSTED") return j(`${label} 사용량(한도·크레딧)이 소진되었습니다`, 429);
+    if (code === "RATE_LIMIT")  return j(`${label} 요청이 일시적으로 몰렸습니다`, 429);
+    if (code === "AI_BUSY")     return j(`${label} 서버가 일시적으로 혼잡합니다`, 503);
+    if (code === "NETWORK")     return j(`${label} 연결이 불안정합니다`, 503);
     return j("생성 실패", 500);
   }
 }
