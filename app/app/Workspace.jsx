@@ -6,6 +6,20 @@ import {
   CATEGORIES, REFINEMENTS, PRIORITIES, catOf, studentMeta, neisBytes, charCount, uid, newActivity,
   pushHistorySnapshot, MAX_HISTORY, wordDiff, scanForbiddenTerms, activityTree, descendantIds,
 } from "@/lib/categories";
+import {
+  PROVIDERS, PROVIDER_KEYS, providerLabel, modelLabel, keyTag, candId, candLabel,
+  buildCandidates, orderByCooldown, loadCooldowns, markCooldown, clearCooldowns, clearCooldownsForKey,
+  loadKeys, saveKeys, waitBeforeRequest, touchRequestAt, sleep, MIN_REQUEST_GAP_MS,
+} from "@/lib/ai";
+
+// 남은 쿨다운을 "3시간 12분" / "45초" 처럼 표시
+function untilText(ts) {
+  const s = Math.max(0, Math.round((ts - Date.now()) / 1000));
+  if (s < 60) return `${s}초`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}분`;
+  return `${Math.floor(m / 60)}시간 ${m % 60}분`;
+}
 
 // 히스토리 타임스탬프 표시용: "07/02 14:23"
 function formatHistDate(iso) {
@@ -93,17 +107,14 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [historyOpen, setHistoryOpen] = useState(false); // 초안 이력 모달
   const [diffTarget, setDiffTarget] = useState(null);    // 이력 모달 내에서 비교 중인 버전
   const [theme, setThemeState] = useState("light");      // 라이트/다크 모드
-  const [provider, setProvider] = useState("gemini"); // 사용 중인 AI 제공자: gemini | openai
-  const [geminiKey, setGeminiKey] = useState("");     // 기기별 사용자 Gemini 키
-  const [openaiKey, setOpenaiKey] = useState("");     // 기기별 사용자 ChatGPT(OpenAI) 키
-  const [keyOpen, setKeyOpen] = useState(false);      // 키 입력 모달
+  const [provider, setProvider] = useState("gemini");    // 우선 사용할 AI 제공자: gemini | openai
+  const [keys, setKeys] = useState({ gemini: [], openai: [] }); // 제공자별 API 키 목록(이 기기에만 저장)
+  const [cooldowns, setCooldowns] = useState({});        // 최근 실패해 잠시 건너뛸 후보들
+  const [keyOpen, setKeyOpen] = useState(false);         // 키 관리 모달
   const [keyProvider, setKeyProvider] = useState("gemini"); // 모달 내 선택된 제공자 탭
-  const [keyInput, setKeyInput] = useState("");       // 모달 임시 입력값
-  const apiKey = provider === "openai" ? openaiKey : geminiKey;
-  const PROVIDERS = {
-    gemini: { label: "Gemini", placeholder: "AIza...", linkLabel: "Google AI Studio에서 무료로 발급받기 ↗", linkHref: "https://aistudio.google.com/app/apikey" },
-    openai: { label: "ChatGPT", placeholder: "sk-...", linkLabel: "OpenAI 플랫폼에서 API 키 발급받기 ↗", linkHref: "https://platform.openai.com/api-keys" },
-  };
+  const [keyInput, setKeyInput] = useState("");          // 모달 임시 입력값
+  const keyCount = keys.gemini.length + keys.openai.length;
+  const hasKey = keyCount > 0;
   const [installEvt, setInstallEvt] = useState(null); // PWA 설치 프롬프트 이벤트
   const addNameRef = useRef(null);
   const resultRef = useRef(null);
@@ -111,14 +122,14 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
 
   useEffect(() => { if (addOpen) setTimeout(() => addNameRef.current?.focus(), 30); }, [addOpen]);
 
-  // 기기별 저장된 제공자·API 키 불러오기
+  // 기기별 저장된 우선 제공자·API 키 목록 불러오기 (구 단일 키 형식은 자동 이관)
   useEffect(() => {
     try {
       const p = localStorage.getItem("ai_provider");
       if (p === "openai" || p === "gemini") setProvider(p);
-      setGeminiKey(localStorage.getItem("gemini_api_key") || "");
-      setOpenaiKey(localStorage.getItem("openai_api_key") || "");
     } catch {}
+    setKeys(loadKeys());
+    setCooldowns(loadCooldowns());
   }, []);
 
   // 기기별 저장된 라이트/다크 모드 불러오기 (실제 적용은 layout.js의 인라인 스크립트가 먼저 처리해 깜빡임을 막음)
@@ -154,29 +165,34 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
 
   function openKeyModal() {
     setKeyProvider(provider);
-    setKeyInput(provider === "openai" ? openaiKey : geminiKey);
+    setKeyInput("");
+    setCooldowns(loadCooldowns());
     setKeyOpen(true);
   }
-  function switchKeyTab(p) {
-    setKeyProvider(p);
-    setKeyInput(p === "openai" ? openaiKey : geminiKey);
-  }
-  function saveKey() {
+  // 키 추가 — 같은 제공자에 여러 개 등록하면 한도 소진 시 자동으로 다음 키로 넘어간다.
+  function addKey() {
     const v = keyInput.trim();
-    const storageKey = keyProvider === "openai" ? "openai_api_key" : "gemini_api_key";
-    try {
-      v ? localStorage.setItem(storageKey, v) : localStorage.removeItem(storageKey);
-      localStorage.setItem("ai_provider", keyProvider);
-    } catch {}
-    if (keyProvider === "openai") setOpenaiKey(v); else setGeminiKey(v);
-    setProvider(keyProvider);
-    setKeyOpen(false);
+    if (!v) return;
+    const next = saveKeys(keyProvider, [...(keys[keyProvider] || []), v]);
+    setKeys((k) => ({ ...k, [keyProvider]: next }));
+    clearCooldownsForKey(v); // 새로 등록한 키에 남아 있던 쿨다운 해제
+    setCooldowns(loadCooldowns());
+    setKeyInput("");
   }
-  function clearKey() {
-    const storageKey = keyProvider === "openai" ? "openai_api_key" : "gemini_api_key";
-    try { localStorage.removeItem(storageKey); } catch {}
-    if (keyProvider === "openai") setOpenaiKey(""); else setGeminiKey("");
-    setKeyInput(""); setKeyOpen(false);
+  function removeKey(p, k) {
+    const next = saveKeys(p, (keys[p] || []).filter((x) => x !== k));
+    setKeys((s) => ({ ...s, [p]: next }));
+    clearCooldownsForKey(k);
+    setCooldowns(loadCooldowns());
+  }
+  // 우선 제공자 지정 — 후보 큐의 맨 앞에 오는 제공자
+  function pickPrimary(p) {
+    setProvider(p);
+    try { localStorage.setItem("ai_provider", p); } catch {}
+  }
+  function resetCooldowns() {
+    clearCooldowns();
+    setCooldowns({});
   }
 
   const student = students.find((s) => s.id === activeSid) || null;
@@ -345,45 +361,34 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const forbiddenHits = useMemo(() => scanForbiddenTerms(entry?.draft || ""), [entry?.draft]);
   const byteForbiddenHits = useMemo(() => scanForbiddenTerms(byteText), [byteText]);
 
-  // ── AI ──
-  const RETRYABLE_CODES = new Set(["NO_API_KEY", "BAD_API_KEY", "RATE_LIMIT", "QUOTA_EXHAUSTED", "AI_BUSY", "NETWORK"]);
+  // ── AI ── 후보(제공자 × 키 × 모델) 큐를 순서대로 시도한다.
+  // 재시도로 풀릴 오류(429 일시 혼잡·5xx)는 서버가 이미 백오프 재시도한 뒤 실패로 돌려주므로,
+  // 여기서는 곧바로 '다른 조합'으로 넘어가는 것이 가장 빠른 복구 경로다.
+  const SWITCHABLE = new Set(["NO_API_KEY", "BAD_API_KEY", "RATE_LIMIT", "QUOTA_EXHAUSTED", "AI_BUSY", "NETWORK", "UNKNOWN"]);
 
-  // 한 제공자의 실패 원인을 사람이 읽을 문장으로 (키 출처까지 반영)
-  function causeOf(e, p) {
-    const label = PROVIDERS[p].label;
-    const shared = e.keySource === "server" ? "(등록된 개인 키가 없어 공용 키로 시도됨) " : "";
+  // 실패 원인을 사람이 읽을 문장으로 (어떤 키·모델이었는지 함께)
+  function causeOf(e, cand) {
+    const who = candLabel(cand);
+    const shared = e.keySource === "server" ? " (등록된 개인 키가 없어 공용 키로 시도됨)" : "";
     switch (e.code) {
-      case "NO_API_KEY":      return `${label}: ${shared}API 키가 등록되어 있지 않습니다.`;
-      case "BAD_API_KEY":     return `${label}: ${shared}API 키가 올바르지 않습니다. 키를 다시 복사해 등록해 주세요.`;
-      case "QUOTA_EXHAUSTED": return `${label}: ${shared}사용량(크레딧)이 모두 소진되었습니다. 기다려도 자동으로 복구되지 않으니, 본인 키를 새로 등록하거나 결제·한도를 확인해 주세요.`;
-      case "RATE_LIMIT":      return `${label}: ${shared}요청이 일시적으로 몰렸습니다. 1~2분 후 다시 시도해 주세요.`;
+      case "NO_API_KEY":      return `${who}${shared}: API 키가 등록되어 있지 않습니다.`;
+      case "BAD_API_KEY":     return `${who}${shared}: API 키가 올바르지 않습니다.`;
+      case "QUOTA_EXHAUSTED": return `${who}${shared}: 사용량(한도·크레딧)이 소진되었습니다.`;
+      case "RATE_LIMIT":      return `${who}${shared}: 요청이 몰려 한도에 걸렸습니다.`;
       case "AI_BUSY":
-      case "NETWORK":         return `${label}: 서버가 일시적으로 혼잡하거나 연결이 불안정합니다.`;
-      default:                return `${label}: ${e.detail || e.message || "알 수 없는 오류"}`;
+      case "NETWORK":         return `${who}: 서버가 혼잡하거나 연결이 불안정합니다.`;
+      default:                return `${who}: ${e.detail || e.message || "알 수 없는 오류"}`;
     }
   }
   const isKeyProblem = (e) => e.code === "NO_API_KEY" || e.code === "BAD_API_KEY" || e.code === "QUOTA_EXHAUSTED";
 
-  // 서버 에러를 화면에 보여줄 문구로 변환.
-  // 자동 폴백으로 둘 다 실패한 경우, 두 제공자의 원인을 '각각' 보여준다.
-  // (기존에는 나중 실패한 제공자의 원인만 남아 진짜 원인이 가려졌음)
-  function mapFail(e1, p1, e2 = null, p2 = null) {
-    const fail = (msg) => { const err = new Error(msg); err.friendly = true; return err; };
-    if (e2 && p2) {
-      if (isKeyProblem(e1) || isKeyProblem(e2)) openKeyModal();
-      return fail(`두 AI 모두 실패했습니다.\n· ${causeOf(e1, p1)}\n· ${causeOf(e2, p2)}`);
-    }
-    if (isKeyProblem(e1)) openKeyModal();
-    return fail(causeOf(e1, p1));
-  }
-
-  // 단일 provider 요청 — 실패 시 e.code(서버 에러 코드 또는 NETWORK)를 담아 throw
-  async function requestOnce(payload, useProvider, useKey) {
+  // 단일 후보 요청 — 실패 시 e.code(서버 에러 코드 또는 NETWORK)를 담아 throw
+  async function requestOnce(payload, cand) {
     let res;
     try {
       res = await fetch("/api/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...payload, provider: useProvider, apiKey: useKey }),
+        body: JSON.stringify({ ...payload, provider: cand.provider, model: cand.model, apiKey: cand.apiKey }),
       });
     } catch {
       const e = new Error("네트워크 오류"); e.code = "NETWORK"; throw e;
@@ -391,42 +396,83 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const e = new Error(data?.error || "생성 실패");
-      e.code = data?.code || "UNKNOWN"; e.detail = data?.detail;
-      e.keySource = data?.keySource || "none"; // user = 본인 키, server = 배포 공용 키
+      e.code = data?.code || "UNKNOWN";
+      e.detail = data?.detail;
+      e.retryAfter = data?.retryAfter || 0;
+      e.keySource = data?.keySource || "none";
       throw e;
     }
     return { draft: data.draft || "", notes: data.notes || "" };
   }
 
-  // 공통 호출: 현재 선택된 provider로 먼저 시도하고, 키 문제·혼잡 등으로 실패하면
-  // 나머지 한 provider로 자동으로 한 번 더 시도한다(AI 자동 폴백).
-  // onFallbackStart(from, to)는 전환이 실제로 시작될 때 로딩 문구 등을 갱신하기 위한 훅.
-  async function callGenerate(payload, onFallbackStart) {
-    const primary = provider;
-    const fallback = primary === "openai" ? "gemini" : "openai";
-    const keyOf = (p) => (p === "openai" ? openaiKey : geminiKey);
+  // 후보 큐를 순차 시도. 실패한 후보는 쿨다운에 등록해 다음 생성 때 건너뛴다.
+  // onStep(cand, i, total, prev) 로 진행 상황(로딩 문구)을 갱신한다.
+  async function callGenerate(payload, onStep) {
+    const cands = buildCandidates(provider, keys);
+    const { queue, cooled } = orderByCooldown(cands, loadCooldowns());
+    if (queue.length === 0) {
+      const e = new Error("등록된 API 키가 없습니다. [API 키]에서 키를 등록해 주세요.");
+      e.friendly = true; openKeyModal(); throw e;
+    }
 
-    try {
-      return await requestOnce(payload, primary, keyOf(primary));
-    } catch (e1) {
-      if (!RETRYABLE_CODES.has(e1.code)) throw mapFail(e1, primary);
-      onFallbackStart?.(primary, fallback);
+    // 분당 요청 한도(RPM) 초과 예방 — 직전 요청과 너무 가까우면 잠깐 간격을 둔다.
+    let wait = waitBeforeRequest();
+    while (wait > 0) {
+      onStep?.(null, 0, queue.length, null, Math.ceil(wait / 1000));
+      await sleep(Math.min(wait, 1000));
+      wait = waitBeforeRequest();
+    }
+
+    const fails = [];
+    for (let i = 0; i < queue.length; i++) {
+      const cand = queue[i];
+      onStep?.(cand, i, queue.length, fails[fails.length - 1] || null, 0);
+      touchRequestAt();
       try {
-        const result = await requestOnce(payload, fallback, keyOf(fallback));
-        setFallbackInfo(`${PROVIDERS[primary].label}가 응답하지 않아 ${PROVIDERS[fallback].label}로 자동 전환해 생성했어요.`);
+        const result = await requestOnce(payload, cand);
+        if (i > 0) {
+          setFallbackInfo(
+            `${candLabel(fails[0].cand)}가 응답하지 않아 ${candLabel(cand)}(으)로 자동 전환해 생성했어요.`
+          );
+        }
+        setCooldowns(loadCooldowns());
         return result;
-      } catch (e2) {
-        throw mapFail(e1, primary, e2, fallback); // 두 실패 원인을 모두 전달
+      } catch (e) {
+        markCooldown(cand, e.code, e.retryAfter);
+        fails.push({ cand, e });
+        if (!SWITCHABLE.has(e.code)) break; // 전환해도 소용없는 오류 → 즉시 중단
       }
     }
+
+    setCooldowns(loadCooldowns());
+    if (fails.some(({ e }) => isKeyProblem(e))) openKeyModal();
+    // 같은 원인끼리 묶어 요약 (예: "Gemini 3개 조합 · 한도 소진")
+    const lines = [];
+    const seen = new Set();
+    for (const f of fails) {
+      const line = causeOf(f.e, f.cand);
+      if (seen.has(line)) continue;
+      seen.add(line); lines.push("· " + line);
+    }
+    const err = new Error(
+      `${fails.length}개 조합을 모두 시도했지만 실패했습니다.\n${lines.join("\n")}\n\n같은 제공자에 다른 API 키를 하나 더 등록하면 한도 소진 시 자동으로 넘어갑니다.`
+    );
+    err.friendly = true;
+    throw err;
   }
+
+  // 로딩 문구 만들기 — 몇 번째 후보를 어떤 모델·키로 시도 중인지 보여준다.
+  const stepMsg = (base) => (cand, i, total, prev, waitSec) => {
+    if (waitSec) return `요청 간격 조절 중… ${waitSec}초 후 시작`;
+    const head = i === 0 ? base : `${prev ? candLabel(prev.cand) + " 실패 → " : ""}${candLabel(cand)}(으)로 전환해 재시도 중…`;
+    return total > 1 && i > 0 ? `${head} (${i + 1}/${total})` : head;
+  };
 
   async function runGenerate(payload, msg) {
     setError(""); setCopied(false); setFallbackInfo(""); setLoading(true); setLoadingMsg(msg);
     try {
-      const { draft, notes } = await callGenerate(payload, (from, to) => {
-        setLoadingMsg(`${PROVIDERS[from].label}가 혼잡해 ${PROVIDERS[to].label}로 전환하는 중…`);
-      });
+      const msgOf = stepMsg(msg);
+      const { draft, notes } = await callGenerate(payload, (...args) => setLoadingMsg(msgOf(...args)));
       // AI가 초안을 덮어쓰기 전, 기존 초안이 있었다면 이력에 남겨둔다.
       const prevDraft = (entry.draft || "").trim();
       const history = prevDraft
@@ -485,9 +531,10 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     if (!src || byteLoading) return;
     setByteError(""); setByteNotes(""); setFallbackInfo(""); setByteLoading(true); setByteLoadingMsg(msg);
     try {
+      const msgOf = stepMsg(msg);
       const { draft, notes } = await callGenerate({
         mode: "refine", category: byteCat, subject: "", target: byteTarget || 1500, draft: src, instruction,
-      }, (from, to) => setByteLoadingMsg(`${PROVIDERS[from].label}가 혼잡해 ${PROVIDERS[to].label}로 전환하는 중…`));
+      }, (...args) => setByteLoadingMsg(msgOf(...args)));
       setByteText(draft || src);
       setByteNotes(notes || "");
     } catch (e) {
@@ -527,6 +574,21 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const byteOver = byteTarget > 0 && byteBytes > byteTarget;
   const bytePct = byteTarget > 0 ? Math.min((byteBytes / byteTarget) * 100, 100) : 0;
   const byteGauge = byteOver ? "over" : (byteTarget > 0 && byteBytes > byteTarget * 0.9) ? "near" : "";
+
+  // ── 시도 계획(후보 큐) 미리보기 — 키·모델·제공자를 어떤 순서로 시도하는지 ──
+  const attemptPlan = useMemo(
+    () => orderByCooldown(buildCandidates(provider, keys), cooldowns).queue,
+    [provider, keys, cooldowns]
+  );
+  const attemptCount = attemptPlan.length;
+  const cooledCount = attemptPlan.filter((c) => cooldowns[candId(c)] > Date.now()).length;
+  // 특정 키의 상태 문구 — 그 키로 만든 조합 중 몇 개가 쿨다운(건너뛰기) 중인지
+  const modelsCooled = (p, k) => {
+    const all = PROVIDERS[p].models.map((m) => ({ provider: p, model: m, apiKey: k }));
+    const n = all.filter((c) => cooldowns[candId(c)] > Date.now()).length;
+    if (n === 0) return "";
+    return n === all.length ? "한도 도달 · 잠시 건너뜀" : `모델 ${n}/${all.length} 건너뜀`;
+  };
 
   return (
     <div className="sg-app">
@@ -611,18 +673,19 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
           </div>
           <div className="sg-foot-actions">
             <button className="sg-fbtn" onClick={() => setByteOpen(true)}>바이트 계산기</button>
-            <button className={"sg-fbtn key" + (apiKey ? " on" : "")} onClick={openKeyModal}>
-              {PROVIDERS[provider].label} 키{apiKey ? " ✓" : ""}
+            <button className={"sg-fbtn key" + (hasKey ? " on" : "")} onClick={openKeyModal}>
+              API 키{hasKey ? ` ${keyCount}개 ✓` : ""}
             </button>
             <button className="sg-fbtn" onClick={toggleTheme}>{theme === "dark" ? "☀️ 라이트모드" : "🌙 다크모드"}</button>
             {installEvt && <button className="sg-fbtn install" onClick={installApp}>⬇ 앱 설치</button>}
             <button className="sg-fbtn danger" onClick={signOut}>로그아웃</button>
           </div>
-          {apiKey && (
+          {hasKey && (
             <p className="sg-fallback-hint">
-              {geminiKey && openaiKey
-                ? "⚡ 자동 폴백 켜짐 — 한쪽이 혼잡하면 다른 쪽으로 자동 전환돼요."
-                : "두 제공자를 모두 등록하면 한쪽에 문제가 생겨도 자동 전환돼요."}
+              {attemptCount > 1
+                ? `⚡ 자동 전환 ${attemptCount}단계 — 한도·혼잡이 걸리면 다른 키·모델·제공자로 즉시 넘어가요.`
+                : "키를 하나 더 등록하면 한도 소진·혼잡 시 자동으로 다른 조합으로 넘어가요."}
+              {cooledCount > 0 && ` · 잠시 건너뛰는 조합 ${cooledCount}개`}
             </p>
           )}
         </div>
@@ -644,12 +707,12 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
           {student && <button className="sg-topbar-edit" onClick={openEdit}>학생 정보 수정</button>}
         </div>
 
-        {!apiKey && (
+        {!hasKey && (
           <div className="sg-keybanner">
             <span className="sg-keybanner-icon">🔑</span>
             <div className="sg-keybanner-text">
               <b>AI 초안 생성에는 본인 API 키가 필요해요.</b>
-              <span>Gemini 또는 ChatGPT 중 하나를 골라 무료로 발급받은 키를 등록하면 바로 사용할 수 있어요. 둘 다 등록해두면 한쪽이 혼잡할 때 자동으로 다른 쪽으로 전환됩니다(AI 자동 폴백). 키는 이 브라우저에만 저장되고 서버에는 보관되지 않습니다.</span>
+              <span>Gemini 또는 ChatGPT 키를 무료로 발급받아 등록하면 바로 사용할 수 있어요. <b>키를 여러 개 등록</b>해두면 한도 소진·서버 혼잡 시 다른 키·모델·제공자로 자동 전환됩니다. 키는 이 브라우저에만 저장되고 서버에는 보관되지 않습니다.</span>
             </div>
             <button className="sg-keybanner-btn" onClick={openKeyModal}>API 키 등록</button>
           </div>
@@ -1103,31 +1166,78 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
       {keyOpen && (
         <>
           <div className="sg-overlay" onClick={() => setKeyOpen(false)} />
-          <div className="sg-keymodal">
+          <div className="sg-keymodal sg-keymodal-wide">
             <div className="sg-keymodal-title">AI API 키</div>
             <div className="sg-keymodal-tabs">
-              {Object.entries(PROVIDERS).map(([p, info]) => (
+              {PROVIDER_KEYS.map((p) => (
                 <button key={p} className={"sg-tab" + (keyProvider === p ? " on" : "")}
-                        onClick={() => switchKeyTab(p)} type="button">
-                  {info.label}{(p === "openai" ? openaiKey : geminiKey) ? " ✓" : ""}
+                        onClick={() => { setKeyProvider(p); setKeyInput(""); }} type="button">
+                  {PROVIDERS[p].label}{keys[p].length ? ` ${keys[p].length}` : ""}
                 </button>
               ))}
             </div>
             <p className="sg-keymodal-desc">
-              본인 {PROVIDERS[keyProvider].label} API 키를 입력하면 이 기기에서는 해당 키·모델로 생성합니다. 키는 이 브라우저에만 저장되며(localStorage) 서버에 보관되지 않습니다.
-              {" "}Gemini·ChatGPT 두 키를 모두 등록해두면, 생성 중 한쪽이 혼잡하거나 오류가 나면 자동으로 다른 쪽으로 전환해 다시 시도합니다.
+              키는 이 브라우저에만 저장되며(localStorage) 서버에 보관되지 않습니다.
+              {" "}<b>한 제공자에 키를 여러 개</b> 등록할 수 있어요. 생성 시 <b>키 → 모델 → 다른 제공자</b> 순서로 자동 전환하므로,
+              무료 등급 일일 한도가 걸려도 다른 키·모델로 곧바로 이어서 작성됩니다.
             </p>
-            <input className="sg-input" type="password" placeholder={PROVIDERS[keyProvider].placeholder} value={keyInput}
-                   onChange={(e) => setKeyInput(e.target.value)}
-                   onKeyDown={(e) => e.key === "Enter" && saveKey()} autoFocus />
+
+            <div className="sg-keylist">
+              {keys[keyProvider].length === 0 ? (
+                <div className="sg-keylist-empty">등록된 {PROVIDERS[keyProvider].label} 키가 없습니다.</div>
+              ) : keys[keyProvider].map((k, i) => (
+                <div className="sg-keyrow" key={k}>
+                  <span className="sg-keyrow-no">{i + 1}</span>
+                  <span className="sg-keyrow-tag">{keyTag(k)}</span>
+                  <span className="sg-keyrow-state">
+                    {modelsCooled(keyProvider, k) || "사용 가능"}
+                  </span>
+                  <button className="sg-keyrow-x" onClick={() => removeKey(keyProvider, k)} aria-label="키 삭제">✕</button>
+                </div>
+              ))}
+            </div>
+
+            <div className="sg-keyadd">
+              <input className="sg-input" type="password" placeholder={PROVIDERS[keyProvider].placeholder} value={keyInput}
+                     onChange={(e) => setKeyInput(e.target.value)}
+                     onKeyDown={(e) => e.key === "Enter" && addKey()} autoFocus />
+              <button className="sg-addbtn" onClick={addKey} disabled={!keyInput.trim()}>＋ 추가</button>
+            </div>
             <a className="sg-keymodal-link" href={PROVIDERS[keyProvider].linkHref} target="_blank" rel="noopener noreferrer">
               키가 없으신가요? {PROVIDERS[keyProvider].linkLabel}
             </a>
+
+            <div className="sg-keyprimary">
+              <span className="sg-keyprimary-label">먼저 시도할 제공자</span>
+              {PROVIDER_KEYS.map((p) => (
+                <button key={p} type="button"
+                        className={"sg-chip" + (provider === p ? " on" : "")}
+                        onClick={() => pickPrimary(p)}>{PROVIDERS[p].label}</button>
+              ))}
+            </div>
+
+            <div className="sg-keyplan">
+              <div className="sg-keyplan-head">시도 순서 ({attemptCount}단계)</div>
+              <ol className="sg-keyplan-list">
+                {attemptPlan.map((c, i) => {
+                  const until = cooldowns[candId(c)];
+                  const cooled = until > Date.now();
+                  return (
+                    <li key={candId(c) + i} className={cooled ? "cooled" : ""}>
+                      {candLabel(c)}
+                      {cooled && <span className="sg-keyplan-cd">건너뜀 · {untilText(until)} 후 복귀</span>}
+                    </li>
+                  );
+                })}
+              </ol>
+              {cooledCount > 0 && (
+                <button className="sg-ghost sg-keyplan-reset" onClick={resetCooldowns}>건너뛰기 초기화</button>
+              )}
+            </div>
+
             <div className="sg-keymodal-row">
-              {(keyProvider === "openai" ? openaiKey : geminiKey) && <button className="sg-keyclear" onClick={clearKey}>등록 해제</button>}
               <div className="sg-keymodal-spacer" />
-              <button className="sg-ghost" onClick={() => setKeyOpen(false)}>취소</button>
-              <button className="sg-addbtn" onClick={saveKey}>저장</button>
+              <button className="sg-addbtn" onClick={() => setKeyOpen(false)}>완료</button>
             </div>
           </div>
         </>
