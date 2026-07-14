@@ -1,7 +1,7 @@
 // 서버 측 AI 생성 라우트 — AI 키는 여기서만 사용(브라우저 비노출). Gemini / ChatGPT(OpenAI) 지원
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { catOf, prioOf } from "@/lib/categories";
+import { catOf, prioOf, activityTree } from "@/lib/categories";
 
 function buildSystem(cat, subject, target) {
   return `당신은 대한민국 고등학교 학교생활기록부(생기부) 작성을 돕는 전문 보조자입니다. 교사가 입력한 학생 활동 관찰 기록을 바탕으로 교육부 학교생활기록부 기재요령에 부합하는 '${cat.label}'${cat.needsSubject && subject ? ` (과목: ${subject})` : ""} 초안을 작성합니다.
@@ -23,6 +23,14 @@ ${cat.guide}
 - 표시가 없는 활동은 보통 비중으로 다룬다.
 - 단, 우선순위에 따른 비중 조절이 글의 자연스러움을 해치지 않도록 전체를 하나의 매끄러운 흐름으로 엮는다.
 
+[활동 간 연계 — 심화 탐구]
+- 입력에서 어떤 활동이 '(활동 X의 심화 탐구)'로 표시되어 있으면, 그 활동은 원 활동 X에서 출발해 이어진 후속·심화 탐구이다.
+- 이런 활동은 반드시 원 활동 바로 뒤에 이어서, 하나의 연결된 탐구 서사로 서술한다. 두 활동을 서로 무관한 별개 문장으로 나열하지 않는다.
+- 원 활동에서 생긴 의문·관심·한계가 무엇이었고, 그것이 심화 탐구로 어떻게 확장·구체화되었으며, 그 결과 무엇을 알게 되었는지의 인과 흐름이 드러나게 쓴다.
+- '~을 계기로', '~에서 나아가', '~ 과정에서 생긴 의문을 해결하고자', '이를 바탕으로' 같은 연결 표현을 활용하되 상투적 반복은 피한다.
+- 연계가 2단계 이상(1차 → 2차 심화)으로 이어질 수 있다. 이 경우 단계가 깊어질수록 탐구의 구체성·전문성과 학생의 자기주도성이 심화되는 과정으로 서술한다.
+- 심화 탐구로 이어진 활동 묶음은 하나의 서사 단위로 다루며, 학생의 지적 호기심이 단발성에 그치지 않고 확장되었다는 점이 자연스럽게 드러나도록 본문의 중심축으로 삼는다.
+
 [반드시 제외할 항목 — 기재 금지]
 - 특정 대상을 식별할 수 있는 고유명사 전체: 대학명(예: OO대학교), 기관·단체·업체명(상호명), 학원명, 강사·강연자·교수 등 특정 인물의 실명, 교외 기관·대회명
 - 교외 수상 실적, 어학시험·인증시험 점수/급수, 모의고사·교내외 시험 성적
@@ -36,18 +44,39 @@ ${cat.guide}
 }
 
 function buildUser(cat, activities) {
-  const lines = (activities || [])
-    .filter((a) => a.title?.trim() || a.detail?.trim() || a.meaning?.trim())
-    .map((a, i) => {
+  // 내용이 있는 활동만 남긴 뒤 트리(심화 탐구 연계) 순서로 정렬한다.
+  // 부모가 비어 있어 걸러졌다면 자식은 자동으로 독립 활동으로 취급된다.
+  const filled = (activities || []).filter(
+    (a) => a.title?.trim() || a.detail?.trim() || a.meaning?.trim()
+  );
+  const nodes = activityTree(filled);
+
+  const lines = nodes
+    .map(({ act: a, label, parent }) => {
       const pr = prioOf(a.priority ?? 1);
       const tag = pr.v === 1 ? "" : ` [우선순위: ${pr.label} — ${pr.emph}]`;
-      const p = [`활동 ${i + 1}: ${a.title || "(제목 없음)"}${tag}`];
+      const rel = parent
+        ? ` (활동 ${parent.label}${parent.title ? ` '${parent.title}'` : ""}의 심화 탐구)`
+        : "";
+      const p = [`활동 ${label}: ${a.title || "(제목 없음)"}${rel}${tag}`];
       if (a.detail?.trim()) p.push(`  - 한 일/관찰: ${a.detail.trim()}`);
       if (a.meaning?.trim()) p.push(`  - 의미/성장: ${a.meaning.trim()}`);
       return p.join("\n");
     })
     .join("\n\n");
-  return `다음은 한 학생의 활동 관찰 기록입니다.\n\n${lines}\n\n위 내용을 종합해 '${cat.label}' 초안을 작성해 주세요.`;
+
+  // 심화 탐구 사슬(2개 이상 연결된 흐름)을 따로 요약해 흐름을 명확히 전달
+  const chains = nodes
+    .filter((n) => n.depth === 0 && nodes.some((m) => m.label.startsWith(n.label + "-")))
+    .map((n) => {
+      const chain = nodes.filter((m) => m.label === n.label || m.label.startsWith(n.label + "-"));
+      return "- " + chain.map((m) => `활동 ${m.label}(${m.act.title || "제목 없음"})`).join(" → ");
+    });
+  const chainBlock = chains.length
+    ? `\n\n[탐구 심화 흐름] 아래 활동들은 앞 활동에서 이어진 심화 탐구입니다. 각 흐름은 하나의 연결된 탐구 서사로 엮어 서술해 주세요.\n${chains.join("\n")}`
+    : "";
+
+  return `다음은 한 학생의 활동 관찰 기록입니다.\n\n${lines}${chainBlock}\n\n위 내용을 종합해 '${cat.label}' 초안을 작성해 주세요.`;
 }
 
 // 구조화된 AI 오류 — code(원인)와 keySource(개인 키 / 공용 서버 키) 를 함께 전달
