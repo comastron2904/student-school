@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
   CATEGORIES, REFINEMENTS, PRIORITIES, catOf, studentMeta, neisBytes, charCount, uid, newActivity,
-  pushHistorySnapshot, MAX_HISTORY, wordDiff, scanForbiddenTerms,
+  pushHistorySnapshot, MAX_HISTORY, wordDiff, scanForbiddenTerms, activityTree, descendantIds,
 } from "@/lib/categories";
 
 // 히스토리 타임스탬프 표시용: "07/02 14:23"
@@ -284,7 +284,12 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   };
   const updateActivity = (id, field, val) => setActivities((a) => a.map((x) => x.id === id ? { ...x, [field]: val } : x));
   const addActivity = () => setActivities((a) => [...a, newActivity()]);
-  const removeActivity = (id) => setActivities((a) => a.length > 1 ? a.filter((x) => x.id !== id) : a);
+  // 활동 삭제 — 이 활동을 원 활동으로 삼던 심화 탐구들은 독립 활동으로 되돌린다.
+  const removeActivity = (id) => setActivities((a) => a.length > 1
+    ? a.filter((x) => x.id !== id).map((x) => x.parentId === id ? { ...x, parentId: "" } : x)
+    : a);
+  // 심화 탐구 연계 지정 — 자기 자신·자신의 하위 활동은 선택할 수 없다(순환 방지).
+  const linkActivity = (id, parentId) => updateActivity(id, "parentId", parentId);
 
   // 제목을 지정해 활동 추가 — 비어 있는 단일 활동이면 거기에 채우고, 아니면 새로 추가
   const addActivityWithTitle = (title) => setActivities((a) => {
@@ -319,6 +324,16 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const suggestedTitles = allSubjectTitles.filter((t) => !presentTitles.has(t));
 
   const hasContent = entry?.activities.some((a) => a.title.trim() || a.detail.trim());
+
+  // ── 활동 트리(심화 탐구 연계) — 화면 표시 순서·번호는 이 트리를 따른다 ──
+  const actNodes = useMemo(() => activityTree(entry?.activities || []), [entry?.activities]);
+  const actTitleOf = (a) => (a.title || "").trim() || "제목 없음";
+  // '이 활동은 무엇의 심화 탐구인가' 후보 — 자기 자신과 자신의 하위 활동은 제외(순환 방지)
+  const parentOptions = (id) => {
+    const banned = descendantIds(entry?.activities || [], id);
+    return actNodes.filter((n) => n.act.id !== id && !banned.has(n.act.id));
+  };
+  const hasLinks = actNodes.some((n) => n.parent);
 
   // 이력 모달에서 비교 중인 버전과 현재 초안의 단어 단위 diff (복원 시 무엇이 바뀌는지 미리 보기)
   const diffTokens = useMemo(() => {
@@ -692,7 +707,31 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
 
                   <div className="sg-card">
                     <div className="sg-eyebrow">활동 기록</div>
-                    <p className="sg-help"><b>한 일 / 관찰</b>은 사실 위주로, <b>의미 / 성장</b>은 드러난 역량이나 변화를 적으면 초안 품질이 좋아집니다.</p>
+                    <p className="sg-help">
+                      <b>한 일 / 관찰</b>은 사실 위주로, <b>의미 / 성장</b>은 드러난 역량이나 변화를 적으면 초안 품질이 좋아집니다.
+                      {" "}어떤 활동이 다른 활동에서 이어진 후속 탐구라면 <b>심화 탐구 연계</b>로 지정하세요. AI가 두 활동을 <b>하나의 이어진 탐구 흐름</b>으로 엮어 서술합니다.
+                    </p>
+                    {hasLinks && (
+                      <div className="sg-chain">
+                        <span className="sg-chain-label">탐구 심화 흐름</span>
+                        <div className="sg-chain-list">
+                          {actNodes.filter((n) => n.depth === 0 && actNodes.some((m) => m.label.startsWith(n.label + "-")))
+                            .map((n) => {
+                              const chain = actNodes.filter((m) => m.label === n.label || m.label.startsWith(n.label + "-"));
+                              return (
+                                <div className="sg-chain-row" key={n.act.id}>
+                                  {chain.map((m, i) => (
+                                    <span key={m.act.id}>
+                                      {i > 0 && <span className="sg-chain-arrow"> → </span>}
+                                      <span className="sg-chain-node">{actTitleOf(m.act)}</span>
+                                    </span>
+                                  ))}
+                                </div>
+                              );
+                            })}
+                        </div>
+                      </div>
+                    )}
                     {isSubjectEntry && subjKey && suggestedTitles.length > 0 && (
                       <div className="sg-suggest">
                         <span className="sg-suggest-label">같은 과목「{subjKey}」 활동 제목 불러오기</span>
@@ -705,10 +744,16 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                       </div>
                     )}
                     <div className="sg-acts">
-                      {entry.activities.map((a, i) => (
-                        <div className="sg-act" key={a.id}>
+                      {actNodes.map(({ act: a, depth, label, parent }) => (
+                        <div className={"sg-act" + (depth > 0 ? " sub" : "")} key={a.id}
+                             style={depth > 0 ? { marginLeft: Math.min(depth, 3) * 20 } : undefined}>
+                          {parent && (
+                            <div className="sg-act-rel">
+                              ↳ <b>활동 {parent.label} 「{parent.title || "제목 없음"}」</b>의 심화 탐구
+                            </div>
+                          )}
                           <div className="sg-act-head">
-                            <span className="sg-act-no">{String(i + 1).padStart(2, "0")}</span>
+                            <span className="sg-act-no">{label}</span>
                             <input className="sg-act-title" placeholder="활동 제목 (예: 환경 캠페인 기획)"
                                    list={isSubjectEntry ? "sg-subj-titles" : undefined}
                                    value={a.title} onChange={(e) => updateActivity(a.id, "title", e.target.value)} />
@@ -729,6 +774,24 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                                     value={a.detail} onChange={(e) => updateActivity(a.id, "detail", e.target.value)} />
                           <textarea className="sg-area" rows={2} placeholder="의미 / 성장 — 드러난 역량, 태도, 변화 (선택)"
                                     value={a.meaning} onChange={(e) => updateActivity(a.id, "meaning", e.target.value)} />
+                          {entry.activities.length > 1 && (
+                            <div className="sg-act-link">
+                              <label htmlFor={"lnk-" + a.id}>심화 탐구 연계</label>
+                              <select id={"lnk-" + a.id} className="sg-link-sel"
+                                      value={a.parentId || ""}
+                                      onChange={(e) => linkActivity(a.id, e.target.value)}>
+                                <option value="">독립 활동 (연계 없음)</option>
+                                {parentOptions(a.id).map((n) => (
+                                  <option key={n.act.id} value={n.act.id}>
+                                    활동 {n.label}. {actTitleOf(n.act)} 의 심화 탐구
+                                  </option>
+                                ))}
+                              </select>
+                              {a.parentId && (
+                                <button type="button" className="sg-link-clear" onClick={() => linkActivity(a.id, "")}>연계 해제</button>
+                              )}
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
