@@ -91,6 +91,16 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [edit, setEdit] = useState({ name: "", school: "", grade: "", klass: "", number: "" });
   const [delTarget, setDelTarget] = useState(null); // 삭제 확인 대상 { id, name }
   const [statusFilter, setStatusFilter] = useState("all"); // 학생 목록 상태 필터: all | none | todo | review | done
+
+  // ── 일괄 생성 ──
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchStatus, setBatchStatus] = useState("todo");   // 대상 상태 필터
+  const [batchCount, setBatchCount] = useState(1);           // 처리할 학생 수(사용자 입력)
+  const [batchOnlyEmpty, setBatchOnlyEmpty] = useState(true); // 이미 초안이 있는 항목은 건너뛰기
+  const [batchAutoReview, setBatchAutoReview] = useState(true); // 완료 후 상태를 '검토 필요'로 자동 변경
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchProgress, setBatchProgress] = useState(null); // { index, total, name, sub, log:[{id,name,ok,msg}], done }
+  const batchCancelRef = useRef(false);
   const [refineText, setRefineText] = useState("");  // 직접 입력 수정 요청
   const [byteOpen, setByteOpen] = useState(false);   // 바이트 계산기 모달
   const [byteText, setByteText] = useState("");
@@ -556,6 +566,107 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     setRefineText("");
   }
 
+  // ── 일괄 생성 ──
+  // 항목에 채워 넣을 내용(제목/한 일)이 있는지 — 빈 항목은 생성 대상에서 자동 제외
+  const entryHasContent = (e) => (e.activities || []).some((a) => a.title?.trim() || a.detail?.trim());
+  // 한 학생에서 이번에 생성할 항목들 — 내용이 있고, (옵션에 따라) 아직 초안이 없는 것만
+  const entriesToGenerate = (s) =>
+    (s.entries || []).filter((e) => entryHasContent(e) && (!batchOnlyEmpty || !e.draft?.trim()));
+
+  // 사이드바에 표시되는 순서(학급별) 그대로 — 검색어와 무관하게 전체 학생 대상
+  const batchOrder = useMemo(() => groupByClass(students).flatMap((g) => g.students), [students]);
+  // 상태 필터 + 생성할 항목이 1개 이상 있는 학생만 후보로
+  const batchTargets = useMemo(
+    () => batchOrder.filter((s) => (batchStatus === "all" || (s.status || "none") === batchStatus) && entriesToGenerate(s).length > 0),
+    [batchOrder, batchStatus, batchOnlyEmpty]
+  );
+  const batchMax = batchTargets.length;
+
+  function openBatch() {
+    setBatchStatus(statusFilter !== "all" ? statusFilter : "todo");
+    setBatchProgress(null);
+    setBatchOpen(true);
+  }
+  // 대상 조건(상태 필터·옵션)이 바뀌면 인원 수 입력을 기본값(전체 대상)으로 맞춘다
+  useEffect(() => {
+    if (batchOpen && !batchRunning) setBatchCount(Math.max(batchMax, 1));
+  }, [batchOpen, batchStatus, batchOnlyEmpty, batchMax, batchRunning]);
+
+  // 특정 항목 하나를 생성 — 현재 화면에 열려 있지 않은 학생/항목도 직접 대상으로 지정해 처리한다.
+  async function generateForEntry(studentId, en, onStep) {
+    const payload = { mode: "generate", category: en.category, subject: en.subject, target: en.target, activities: en.activities };
+    const { draft, notes } = await callGenerate(payload, onStep);
+    const prevDraft = (en.draft || "").trim();
+    const history = prevDraft
+      ? pushHistorySnapshot(en.history, { draft: en.draft, notes: en.notes || "", label: "일괄 생성 전" })
+      : (en.history || []);
+    const patch = { draft, notes, history };
+    setStudents((arr) => arr.map((s) => s.id !== studentId ? s : {
+      ...s, entries: s.entries.map((e) => e.id !== en.id ? e : { ...e, ...patch }),
+    }));
+    await supabase.from("entries").update(patch).eq("id", en.id);
+  }
+
+  async function runBatch() {
+    const list = batchTargets.slice(0, Math.max(1, Math.min(batchCount, batchMax)));
+    if (!list.length) return;
+    batchCancelRef.current = false;
+    setBatchRunning(true);
+    setBatchProgress({ index: 0, total: list.length, name: "", sub: "", log: [], done: false, cancelled: false });
+
+    for (let i = 0; i < list.length; i++) {
+      if (batchCancelRef.current) { setBatchProgress((p) => ({ ...p, cancelled: true })); break; }
+      const s = list[i];
+      setBatchProgress((p) => ({ ...p, index: i, name: s.name, sub: "" }));
+      const targets = entriesToGenerate(s);
+      const msgOf = stepMsg("생성 중…");
+      let failErr = null;
+      let doneCount = 0;
+      for (const en of targets) {
+        if (batchCancelRef.current) break;
+        try {
+          await generateForEntry(s.id, en, (...args) => setBatchProgress((p) => ({ ...p, sub: msgOf(...args) })));
+          doneCount++;
+        } catch (e) {
+          failErr = e;
+          // 등록된 키가 아예 없는 경우 이후 시도도 전부 실패하므로 배치 전체를 중단
+          if (e?.message?.includes("등록된 API 키가 없습니다")) {
+            setBatchProgress((p) => ({
+              ...p, cancelled: true,
+              log: [...p.log, { id: s.id, name: s.name, ok: false, msg: "API 키가 없어 배치를 중단했습니다." }],
+            }));
+            batchCancelRef.current = true;
+            break;
+          }
+        }
+      }
+      if (batchCancelRef.current && !failErr && doneCount === 0) break;
+
+      const ok = !!doneCount && !failErr;
+      setBatchProgress((p) => ({
+        ...p,
+        log: [...p.log, {
+          id: s.id, name: s.name, ok,
+          msg: ok ? `${doneCount}개 항목 생성 완료`
+               : failErr ? (failErr.friendly ? failErr.message.split("\n")[0] : "생성 실패")
+               : "건너뜀",
+        }],
+      }));
+      // 생성에 성공했고 아직 '완료'가 아니라면 '검토 필요'로 자동 전환 — 무엇을 검토해야 할지 놓치지 않도록
+      if (ok && batchAutoReview && (s.status || "none") !== "done") {
+        await pickStatus(s.id, "review");
+      }
+    }
+    setBatchProgress((p) => ({ ...p, done: true }));
+    setBatchRunning(false);
+  }
+  function cancelBatch() { batchCancelRef.current = true; }
+  function closeBatch() {
+    if (batchRunning) return;
+    setBatchOpen(false);
+    setBatchProgress(null);
+  }
+
   // ── 바이트 계산기 AI 수정 ──
   async function refineByte(instruction, msg) {
     const src = byteText.trim();
@@ -643,6 +754,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
           <button className={"sg-newbtn" + (addOpen ? " open" : "")} onClick={() => setAddOpen((o) => !o)}>
             {addOpen ? "✕ 닫기" : "＋ 새 학생 추가"}
           </button>
+          <button className="sg-batchbtn" onClick={openBatch}>⚡ 일괄 생성</button>
           <input className="sg-search" placeholder="학생 이름 검색"
                  value={query} onChange={(e) => setQuery(e.target.value)} />
         </div>
@@ -1312,6 +1424,105 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
               <div className="sg-keymodal-spacer" />
               <button className="sg-addbtn" onClick={() => setKeyOpen(false)}>완료</button>
             </div>
+          </div>
+        </>
+      )}
+
+      {/* ───────────── 일괄 생성 모달 ───────────── */}
+      {batchOpen && (
+        <>
+          <div className="sg-overlay" onClick={closeBatch} />
+          <div className="sg-batchmodal">
+            <div className="sg-keymodal-title">일괄 생성</div>
+
+            {!batchProgress ? (
+              <>
+                <p className="sg-keymodal-desc">
+                  조건에 맞는 학생을 목록 순서대로 처리합니다. 활동 내용이 채워진 항목만 대상이 되며,
+                  이미 등록된 API 키·모델 자동 전환이 그대로 적용됩니다.
+                </p>
+
+                <div className="sg-batchrow">
+                  <span className="sg-batchrow-label">대상 상태</span>
+                  <div className="sg-batchchips">
+                    <button className={"sg-chip" + (batchStatus === "all" ? " on" : "")} onClick={() => setBatchStatus("all")}>전체</button>
+                    {STUDENT_STATUSES.map((st) => (
+                      <button key={st.key} className={"sg-chip" + (batchStatus === st.key ? " on" : "")}
+                              onClick={() => setBatchStatus(st.key)}>
+                        <span className="sg-statuschip-dot" style={{ background: st.dot }} />{st.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <label className="sg-batchcheck">
+                  <input type="checkbox" checked={batchOnlyEmpty} onChange={(e) => setBatchOnlyEmpty(e.target.checked)} />
+                  이미 초안이 있는 항목은 건너뛰기
+                </label>
+                <label className="sg-batchcheck">
+                  <input type="checkbox" checked={batchAutoReview} onChange={(e) => setBatchAutoReview(e.target.checked)} />
+                  생성 완료 후 학생 상태를 &apos;검토 필요&apos;로 자동 변경
+                </label>
+
+                <div className="sg-batchrow">
+                  <span className="sg-batchrow-label">처리할 학생 수</span>
+                  <input className="sg-batchcount" type="number" min={1} max={Math.max(batchMax, 1)}
+                         value={batchCount}
+                         onChange={(e) => setBatchCount(Math.max(1, Math.min(Number(e.target.value) || 1, Math.max(batchMax, 1))))} />
+                  <span className="sg-batchrow-hint">/ 조건에 맞는 학생 {batchMax}명</span>
+                </div>
+
+                {batchMax === 0 ? (
+                  <div className="sg-list-empty">조건에 맞으면서 생성할 활동 내용이 있는 학생이 없습니다.</div>
+                ) : (
+                  <div className="sg-batchpreview">
+                    {batchTargets.slice(0, batchCount).map((s, i) => (
+                      <span className="sg-batchpreview-item" key={s.id}>{i + 1}. {s.name}</span>
+                    ))}
+                    {batchMax > batchCount && <span className="sg-batchpreview-more">외 {batchMax - batchCount}명 제외</span>}
+                  </div>
+                )}
+
+                <div className="sg-keymodal-row">
+                  <div className="sg-keymodal-spacer" />
+                  <button className="sg-ghost" onClick={closeBatch}>취소</button>
+                  <button className="sg-addbtn" onClick={runBatch} disabled={batchMax === 0}>
+                    {Math.min(batchCount, batchMax)}명 시작
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="sg-batchbar">
+                  <div className="sg-batchbar-fill" style={{ width: `${Math.round(((batchProgress.index + (batchProgress.done ? 1 : 0)) / batchProgress.total) * 100)}%` }} />
+                </div>
+                <div className="sg-batchnow">
+                  {batchProgress.done
+                    ? (batchProgress.cancelled ? "중단됨" : "완료됨")
+                    : `(${batchProgress.index + 1}/${batchProgress.total}) ${batchProgress.name} 처리 중…`}
+                </div>
+                {!batchProgress.done && batchProgress.sub && <div className="sg-batchsub">{batchProgress.sub}</div>}
+
+                <div className="sg-batchlog">
+                  {batchProgress.log.map((l, i) => (
+                    <div className={"sg-batchlog-row" + (l.ok ? "" : " fail")} key={l.id + i}>
+                      <span className="sg-batchlog-mark">{l.ok ? "✓" : "✕"}</span>
+                      <span className="sg-batchlog-name">{l.name}</span>
+                      <span className="sg-batchlog-msg">{l.msg}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="sg-keymodal-row">
+                  <div className="sg-keymodal-spacer" />
+                  {!batchProgress.done ? (
+                    <button className="sg-dangerbtn" onClick={cancelBatch}>중단</button>
+                  ) : (
+                    <button className="sg-addbtn" onClick={closeBatch}>닫기</button>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </>
       )}
