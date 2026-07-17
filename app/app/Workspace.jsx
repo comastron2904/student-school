@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/client";
 import {
   CATEGORIES, REFINEMENTS, PRIORITIES, catOf, studentMeta, neisBytes, charCount, uid, newActivity,
   pushHistorySnapshot, MAX_HISTORY, wordDiff, scanForbiddenTerms, activityTree, descendantIds,
+  STUDENT_STATUSES, statusOf,
 } from "@/lib/categories";
 import {
   PROVIDERS, PROVIDER_KEYS, providerLabel, modelLabel, keyTag, candId, candLabel,
@@ -89,6 +90,7 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [editOpen, setEditOpen] = useState(false); // 학생 정보 수정 모달
   const [edit, setEdit] = useState({ name: "", school: "", grade: "", klass: "", number: "" });
   const [delTarget, setDelTarget] = useState(null); // 삭제 확인 대상 { id, name }
+  const [statusFilter, setStatusFilter] = useState("all"); // 학생 목록 상태 필터: all | none | todo | review | done
   const [refineText, setRefineText] = useState("");  // 직접 입력 수정 요청
   const [byteOpen, setByteOpen] = useState(false);   // 바이트 계산기 모달
   const [byteText, setByteText] = useState("");
@@ -264,6 +266,35 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     setStudents((arr) => arr.map((s) => s.id === student.id ? { ...s, ...fields } : s));
     setEditOpen(false);
   }
+
+  // 학생 목록에서 상태 점을 클릭할 때마다 미지정 → 작업 필요 → 검토 필요 → 완료 순으로 순환.
+  // 낙관적으로 화면을 먼저 갱신하고, 실패하면 원래 상태로 되돌린다.
+  const [statusMenuId, setStatusMenuId] = useState(null); // 상태 점 팝오버가 열린 학생 id
+
+  function openStatusMenu(id, e) {
+    e.stopPropagation();
+    setStatusMenuId((cur) => (cur === id ? null : id));
+  }
+  async function pickStatus(id, key, e) {
+    e?.stopPropagation();
+    setStatusMenuId(null);
+    const cur = students.find((s) => s.id === id);
+    const prev = cur?.status || "none";
+    if (prev === key) return;
+    setStudents((arr) => arr.map((s) => s.id === id ? { ...s, status: key } : s));
+    const { error } = await supabase.from("students").update({ status: key }).eq("id", id);
+    if (error) {
+      // status 컬럼이 아직 없는 배포본일 수 있음 — 조용히 되돌리고 안내
+      setStudents((arr) => arr.map((s) => s.id === id ? { ...s, status: prev } : s));
+      setError("상태 저장 실패: students 테이블에 status 컬럼이 있는지 확인해 주세요 (SQL: alter table students add column status text default 'none';)");
+    }
+  }
+  useEffect(() => {
+    if (!statusMenuId) return;
+    const close = () => setStatusMenuId(null);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [statusMenuId]);
 
   // ── 항목 ──
   async function addEntry() {
@@ -560,10 +591,18 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     router.push("/login"); router.refresh();
   }
 
-  const filtered = students.filter((s) => !query.trim() || s.name.includes(query.trim()));
+  const filtered = students
+    .filter((s) => !query.trim() || s.name.includes(query.trim()))
+    .filter((s) => statusFilter === "all" || (s.status || "none") === statusFilter);
   const searching = !!query.trim();
   const groups = groupByClass(filtered);
   const toggleGroup = (key) => setCollapsed((c) => ({ ...c, [key]: !c[key] }));
+  // 상태 필터 칩에 표시할 학생 수(검색어는 반영하되 상태 필터 자체는 무시하고 센다)
+  const statusCounts = STUDENT_STATUSES.reduce((acc, st) => {
+    acc[st.key] = students.filter((s) => !query.trim() || s.name.includes(query.trim()))
+      .filter((s) => (s.status || "none") === st.key).length;
+    return acc;
+  }, {});
   const bytes = entry ? neisBytes(entry.draft) : 0;
   const over = entry ? bytes > entry.target : false;
   const gaugePct = entry ? Math.min((bytes / Math.max(entry.target, 1)) * 100, 100) : 0;
@@ -630,6 +669,20 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
 
         <div className="sg-side-list">
           <div className="sg-list-label">학생 {students.length}명 · {groupByClass(students).length}개 학급</div>
+
+          <div className="sg-statusbar" role="group" aria-label="상태별 보기">
+            <button className={"sg-statuschip all" + (statusFilter === "all" ? " on" : "")}
+                    onClick={() => setStatusFilter("all")}>전체</button>
+            {STUDENT_STATUSES.filter((st) => st.key !== "none").map((st) => (
+              <button key={st.key} className={"sg-statuschip" + (statusFilter === st.key ? " on" : "")}
+                      onClick={() => setStatusFilter((f) => f === st.key ? "all" : st.key)}
+                      title={st.hint}>
+                <span className="sg-statuschip-dot" style={{ background: st.dot }} />
+                {st.label}{statusCounts[st.key] ? ` ${statusCounts[st.key]}` : ""}
+              </button>
+            ))}
+          </div>
+
           {groups.map((grp) => {
             const isCollapsed = !searching && collapsed[grp.key];
             return (
@@ -642,16 +695,36 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                   <span className="sg-group-name">{grp.label}</span>
                   <span className="sg-group-count">{grp.students.length}</span>
                 </button>
-                {!isCollapsed && grp.students.map((s) => (
-                  <div key={s.id} className={"sg-srow" + (s.id === activeSid ? " on" : "")} onClick={() => selectStudent(s.id)}>
-                    <div className="sg-srow-av">{(s.name || "?").trim().charAt(0)}</div>
-                    <div className="sg-srow-main">
-                      <div className="sg-srow-name">{s.name}</div>
-                      <div className="sg-srow-meta">{s.number ? `${s.number}번 · ` : ""}{s.entries.length}개 항목</div>
+                {!isCollapsed && grp.students.map((s) => {
+                  const st = statusOf(s.status || "none");
+                  return (
+                    <div key={s.id} className={"sg-srow" + (s.id === activeSid ? " on" : "")} onClick={() => selectStudent(s.id)}>
+                      <div className="sg-srow-av">{(s.name || "?").trim().charAt(0)}</div>
+                      <div className="sg-srow-main">
+                        <div className="sg-srow-name">{s.name}</div>
+                        <div className="sg-srow-meta">{s.number ? `${s.number}번 · ` : ""}{s.entries.length}개 항목</div>
+                      </div>
+                      <div className="sg-srow-status">
+                        <button className="sg-srow-dot" style={{ background: st.dot }}
+                                title={`상태: ${st.label} (클릭해 변경)`}
+                                onClick={(e) => openStatusMenu(s.id, e)} aria-label="학생 상태 변경" />
+                        {statusMenuId === s.id && (
+                          <div className="sg-statusmenu" onClick={(e) => e.stopPropagation()}>
+                            {STUDENT_STATUSES.map((opt) => (
+                              <button key={opt.key}
+                                      className={"sg-statusmenu-item" + ((s.status || "none") === opt.key ? " on" : "")}
+                                      onClick={(e) => pickStatus(s.id, opt.key, e)}>
+                                <span className="sg-statusmenu-dot" style={{ background: opt.dot }} />
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <button className="sg-srow-x" onClick={(e) => { e.stopPropagation(); setDelTarget({ id: s.id, name: s.name }); }} aria-label="학생 삭제">✕</button>
                     </div>
-                    <button className="sg-srow-x" onClick={(e) => { e.stopPropagation(); setDelTarget({ id: s.id, name: s.name }); }} aria-label="학생 삭제">✕</button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             );
           })}
