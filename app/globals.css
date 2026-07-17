@@ -379,7 +379,7 @@ button,input,textarea{font-family:inherit}
 .sg-confirm{width:min(400px,calc(100vw - 36px))}
 .sg-dangerbtn{border:none;background:var(--danger);color:#fff;font-size:12.5px;font-weight:800;padding:9px 18px;border-radius:9px;cursor:pointer;transition:.14s}
 .sg-dangerbtn:hover{filter:brightness(1.06)}
-.sg-keymodal .sg-addbtn{background:var(--accent);color:#fff;padding:9px 18px;border-radius:9px}
+.sg-keymodal .sg-addbtn,.sg-batchmodal .sg-addbtn{background:var(--accent);color:#fff;padding:9px 18px;border-radius:9px}
 
 .sg-histmodal{width:min(520px,calc(100vw - 36px))}
 .sg-histempty{padding:26px 4px;text-align:center;color:var(--muted);font-size:13px}
