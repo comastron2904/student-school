@@ -115,8 +115,8 @@ button,input,textarea{font-family:inherit}
 
 /* 학생 행의 상태 점 + 선택 팝오버 */
 .sg-srow-status{position:relative;flex:0 0 auto}
-.sg-srow-dot{width:10px;height:10px;border-radius:50%;border:2px solid rgba(255,255,255,.25);cursor:pointer;padding:0;transition:.12s}
-.sg-srow-dot:hover{transform:scale(1.25);border-color:rgba(255,255,255,.5)}
+.sg-srow-dot{width:16px;height:16px;border-radius:50%;border:2px solid rgba(255,255,255,.25);cursor:pointer;padding:0;transition:.12s}
+.sg-srow-dot:hover{transform:scale(1.2);border-color:rgba(255,255,255,.5)}
 .sg-statusmenu{position:absolute;z-index:40;right:0;top:calc(100% + 6px);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:5px;box-shadow:0 12px 28px rgba(15,25,22,.35);display:flex;flex-direction:column;gap:1px;min-width:126px}
 .sg-statusmenu-item{display:flex;align-items:center;gap:8px;border:none;background:transparent;color:var(--ink2);font-size:12px;font-weight:600;padding:7px 9px;border-radius:7px;cursor:pointer;text-align:left;white-space:nowrap;transition:.1s}
 .sg-statusmenu-item:hover{background:var(--surface2)}
