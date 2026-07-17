@@ -12,6 +12,7 @@ import {
   buildCandidates, orderByCooldown, loadCooldowns, markCooldown, clearCooldowns, clearCooldownsForKey,
   loadKeys, saveKeys, waitBeforeRequest, touchRequestAt, sleep, MIN_REQUEST_GAP_MS,
 } from "@/lib/ai";
+import { computeDeleteAt, daysUntil, fmtDate, REMINDER_DAYS_BEFORE } from "@/lib/retention";
 
 // 남은 쿨다운을 "3시간 12분" / "45초" 처럼 표시
 function untilText(ts) {
@@ -71,7 +72,7 @@ function groupByClass(students) {
   return arr;
 }
 
-export default function Workspace({ initialStudents, initialEntries, userEmail }) {
+export default function Workspace({ initialStudents, initialEntries, userEmail, initialRetention }) {
   const router = useRouter();
   const supabase = createClient();
 
@@ -101,6 +102,13 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchProgress, setBatchProgress] = useState(null); // { index, total, name, sub, log:[{id,name,ok,msg}], done }
   const batchCancelRef = useRef(false);
+
+  // ── 데이터 보관/자동 삭제 ──
+  const [retention, setRetention] = useState(initialRetention); // null이면 아직 학기 종료일을 지정하지 않음
+  const [retentionOpen, setRetentionOpen] = useState(false);
+  const [semesterEndInput, setSemesterEndInput] = useState(initialRetention?.semester_end_at || "");
+  const [retentionSaving, setRetentionSaving] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const [refineText, setRefineText] = useState("");  // 직접 입력 수정 요청
   const [byteOpen, setByteOpen] = useState(false);   // 바이트 계산기 모달
   const [byteText, setByteText] = useState("");
@@ -667,6 +675,41 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
     setBatchProgress(null);
   }
 
+  // ── 데이터 보관/자동 삭제 ──
+  function openRetention() {
+    setSemesterEndInput(retention?.semester_end_at || "");
+    setRetentionOpen(true);
+  }
+  // 학기 종료일 저장(신규 지정 또는 재설정) — 저장 시 알림 발송 이력·상태를 초기화한다.
+  async function saveSemesterEnd() {
+    if (!semesterEndInput) return;
+    setRetentionSaving(true);
+    const delete_at = computeDeleteAt(semesterEndInput);
+    const row = { semester_end_at: semesterEndInput, delete_at, reminder_sent_at: null, status: "active" };
+    const { data, error } = await supabase.from("retention_settings")
+      .upsert(row, { onConflict: "owner_id" }).select().single();
+    setRetentionSaving(false);
+    if (error) { setError("보관 설정 저장 실패: " + error.message); return; }
+    setRetention(data);
+    setBannerDismissed(false);
+  }
+  // 삭제 예정일을 현재 시점 기준 3개월 뒤로 미루고, 다시 알림을 받을 수 있도록 초기화
+  async function extendRetention() {
+    if (!retention) return;
+    setRetentionSaving(true);
+    const base = new Date() > new Date(retention.delete_at) ? new Date() : new Date(retention.delete_at);
+    const delete_at = computeDeleteAt(base.toISOString().slice(0, 10));
+    const { data, error } = await supabase.from("retention_settings")
+      .update({ delete_at, reminder_sent_at: null, status: "active", extended_count: (retention.extended_count || 0) + 1 })
+      .eq("owner_id", retention.owner_id).select().single();
+    setRetentionSaving(false);
+    if (error) { setError("연장 실패: " + error.message); return; }
+    setRetention(data);
+    setBannerDismissed(false);
+  }
+  const retentionDaysLeft = retention ? daysUntil(retention.delete_at) : null;
+  const showRetentionBanner = !!retention && retentionDaysLeft <= REMINDER_DAYS_BEFORE && !bannerDismissed;
+
   // ── 바이트 계산기 AI 수정 ──
   async function refineByte(instruction, msg) {
     const src = byteText.trim();
@@ -861,6 +904,9 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
             <button className={"sg-fbtn key" + (hasKey ? " on" : "")} onClick={openKeyModal}>
               API 키{hasKey ? ` ${keyCount}개 ✓` : ""}
             </button>
+            <button className={"sg-fbtn" + (retention ? " on" : "")} onClick={openRetention}>
+              ⏳ 데이터 보관{retention ? ` D-${Math.max(retentionDaysLeft, 0)}` : ""}
+            </button>
             <button className="sg-fbtn" onClick={toggleTheme}>{theme === "dark" ? "☀️ 라이트모드" : "🌙 다크모드"}</button>
             {installEvt && <button className="sg-fbtn install" onClick={installApp}>⬇ 앱 설치</button>}
             <button className="sg-fbtn danger" onClick={signOut}>로그아웃</button>
@@ -900,6 +946,24 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
               <span>Gemini 또는 ChatGPT 키를 무료로 발급받아 등록하면 바로 사용할 수 있어요. <b>키를 여러 개 등록</b>해두면 한도 소진·서버 혼잡 시 다른 키·모델·제공자로 자동 전환됩니다. 키는 이 브라우저에만 저장되고 서버에는 보관되지 않습니다.</span>
             </div>
             <button className="sg-keybanner-btn" onClick={openKeyModal}>API 키 등록</button>
+          </div>
+        )}
+
+        {showRetentionBanner && (
+          <div className={"sg-retbanner" + (retentionDaysLeft <= 0 ? " urgent" : "")}>
+            <span className="sg-keybanner-icon">⏳</span>
+            <div className="sg-keybanner-text">
+              <b>
+                {retentionDaysLeft <= 0
+                  ? "학생 데이터가 곧 삭제 처리됩니다."
+                  : `학생 데이터가 ${retentionDaysLeft}일 후(${fmtDate(retention.delete_at)}) 삭제될 예정이에요.`}
+              </b>
+              <span>삭제 시 그 시점까지의 전체 데이터를 JSON으로 백업해 가입 이메일로 보내드린 뒤 삭제합니다. 계속 사용하시려면 지금 연장해 주세요.</span>
+            </div>
+            <button className="sg-keybanner-btn" onClick={extendRetention} disabled={retentionSaving}>
+              {retentionSaving ? "연장 중…" : "3개월 연장"}
+            </button>
+            <button className="sg-retbanner-x" onClick={() => setBannerDismissed(true)} aria-label="닫기">✕</button>
           </div>
         )}
 
@@ -1523,6 +1587,50 @@ export default function Workspace({ initialStudents, initialEntries, userEmail }
                 </div>
               </>
             )}
+          </div>
+        </>
+      )}
+
+      {/* ───────────── 데이터 보관 설정 모달 ───────────── */}
+      {retentionOpen && (
+        <>
+          <div className="sg-overlay" onClick={() => setRetentionOpen(false)} />
+          <div className="sg-keymodal">
+            <div className="sg-keymodal-title">데이터 보관 설정</div>
+            <p className="sg-keymodal-desc">
+              학기 종료일을 지정하면 그 날짜로부터 <b>3개월 뒤</b>에 학생 데이터가 자동 삭제됩니다.
+              삭제 <b>7일 전</b> 가입하신 이메일로 안내 메일을 보내드리며, 삭제 시에는 그 시점의 전체 데이터를
+              JSON 백업 파일로 함께 보내드립니다. 안내를 받은 뒤 앱에서 연장하면 3개월 더 미룰 수 있습니다.
+            </p>
+
+            <div className="sg-batchrow">
+              <span className="sg-batchrow-label">학기 종료일</span>
+              <input className="sg-input" type="date" value={semesterEndInput}
+                     onChange={(e) => setSemesterEndInput(e.target.value)} style={{ maxWidth: 170 }} />
+            </div>
+
+            {semesterEndInput && (
+              <p className="sg-keymodal-desc" style={{ margin: "2px 0 14px" }}>
+                → 삭제 예정일: <b>{fmtDate(computeDeleteAt(semesterEndInput))}</b>
+              </p>
+            )}
+
+            {retention && (
+              <div className="sg-retstatus">
+                <span>현재 설정된 삭제 예정일 <b>{fmtDate(retention.delete_at)}</b> ({Math.max(retentionDaysLeft, 0)}일 남음)</span>
+                {retention.reminder_sent_at && <span className="sg-retstatus-sub">안내 메일 발송됨 · {fmtDate(retention.reminder_sent_at)}</span>}
+                {retention.extended_count > 0 && <span className="sg-retstatus-sub">지금까지 {retention.extended_count}회 연장함</span>}
+                <button className="sg-ghost" onClick={extendRetention} disabled={retentionSaving}>지금 3개월 연장</button>
+              </div>
+            )}
+
+            <div className="sg-keymodal-row">
+              <div className="sg-keymodal-spacer" />
+              <button className="sg-ghost" onClick={() => setRetentionOpen(false)}>닫기</button>
+              <button className="sg-addbtn" onClick={saveSemesterEnd} disabled={!semesterEndInput || retentionSaving}>
+                {retentionSaving ? "저장 중…" : "저장"}
+              </button>
+            </div>
           </div>
         </>
       )}
